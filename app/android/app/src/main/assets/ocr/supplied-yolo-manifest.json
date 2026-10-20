@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "pipelineId": "supplied-yolo-3stage-v1",
+  "semanticsVersion": "supplied-yolo-3stage-v1",
+  "contractStatus": "approved",
+  "created": "2026-10-16",
+  "runtime": "ONNX Runtime CPU: YOLOv8n-OBB (frame) + YOLOv8n (reverse) + YOLOv8n (digits)",
+  "preprocessing": {
+    "version": "opencv-linear-byte-letterbox-rgb-div255-pad114-obb-warp-v1",
+    "colorOrder": "RGB",
+    "scale": 0.00392156862745098,
+    "padValue": 114,
+    "interpolation": "INTER_LINEAR",
+    "obbWarpInterpolation": "INTER_LINEAR",
+    "obbWarpBorderMode": "BORDER_REPLICATE"
+  },
+  "models": {
+    "frame": {
+      "file": "frame.onnx",
+      "sha256": "bbe40d040cfa7a467fbe3051b2d62c29a5d83336da3099e450436c1c0f59cacc",
+      "sizeBytes": 12463574,
+      "sourceFile": "models/best_latest.pt",
+      "sourceSha256": "2f1d73f4ca887b3a59cfe263163ac09f538100b84cb9837c91edd7dc3c105675",
+      "sourceSizeBytes": 6427020,
+      "ckptUltralyticsVersion": "8.2.78",
+      "ckptDate": "2024-08-19T06:33:30.701496",
+      "task": "obb",
+      "imgsz": 640,
+      "trainImgsz": 640,
+      "stride": [
+        8,
+        16,
+        32
+      ],
+      "nc": 1,
+      "names": {
+        "0": "khung"
+      },
+      "modelClass": "OBBModel",
+      "exportUltralyticsVersion": "8.3.221",
+      "opset": 17,
+      "opsetImports": {
+        "ai.onnx": 17
+      },
+      "exportConfig": {
+        "format": "onnx",
+        "imgsz": 640,
+        "batch": 1,
+        "dynamic": false,
+        "simplify": false,
+        "opset": 17,
+        "nms": false,
+        "half": false,
+        "int8": false,
+        "device": "cpu"
+      },
+      "inputName": "images",
+      "inputShape": [
+        1,
+        3,
+        640,
+        640
+      ],
+      "inputDtype": "float32",
+      "outputName": "output0",
+      "outputShape": [
+        1,
+        6,
+        8400
+      ],
+      "outputDtype": "float32",
+      "outputLayout": "BCN:[1, 6, 8400] where C=[cx, cy, w, h, score_khung, angle_rad]",
+      "confThres": 0.25,
+      "iouThres": 0.5,
+      "maxDet": 300,
+      "onnxMetadataProps": {
+        "description": "Ultralytics YOLOv8n-obb model trained on data/mydataset.yaml",
+        "author": "Ultralytics",
+        "date": "2024-08-19T06:33:30.701496",
+        "version": "8.3.221",
+        "license": "AGPL-3.0 License (https://ultralytics.com/license)",
+        "docs": "https://docs.ultralytics.com",
+        "stride": "32",
+        "task": "obb",
+        "batch": "1",
+        "imgsz": "[640, 640]",
+        "names": "{0: 'khung'}",
+        "args": "{'batch': 1, 'half': False, 'dynamic': False, 'simplify': False, 'opset': 17, 'nms': False}",
+        "channels": "3"
+      },
+      "exportParity": {
+        "samples": 4,
+        "maxAbsDelta": 0.009063720703125,
+        "meanAbsDelta": 4.45893912228712e-05,
+        "maxRelDelta": 0.00037450806121341884,
+        "atol": 0.0001,
+        "rtol": 0.0001,
+        "passed": true
+      },
+      "nmsMethod": "probiou_greedy"
+    },
+    "digits": {
+      "file": "digits.onnx",
+      "sha256": "f29cfaeccbbe6ec46f53cc694358dec039604550b73419ab8103775e5ed06fe2",
+      "sizeBytes": 12135238,
+      "sourceFile": "models/best_0608.pt",
+      "sourceSha256": "c475d9e8753f20daae4c405e99b03dfff4868c02926965fce6060743a692a9bd",
+      "sourceSizeBytes": 6225635,
+      "ckptUltralyticsVersion": "8.2.74",
+      "ckptDate": "2024-08-06T10:15:11.292164",
+      "task": "detect",
+      "imgsz": 320,
+      "trainImgsz": 320,
+      "stride": [
+        8,
+        16,
+        32
+      ],
+      "nc": 30,
+      "names": {
+        "0": "0",
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "4": "4",
+        "5": "5",
+        "6": "6",
+        "7": "7",
+        "8": "8",
+        "9": "9",
+        "10": "10",
+        "11": "11",
+        "12": "12",
+        "13": "13",
+        "14": "14",
+        "15": "15",
+        "16": "16",
+        "17": "17",
+        "18": "18",
+        "19": "19",
+        "20": "20",
+        "21": "21",
+        "22": "22",
+        "23": "23",
+        "24": "24",
+        "25": "25",
+        "26": "26",
+        "27": "27",
+        "28": "28",
+        "29": "29"
+      },
+      "modelClass": "DetectionModel",
+      "exportUltralyticsVersion": "8.3.221",
+      "opset": 17,
+      "opsetImports": {
+        "ai.onnx": 17
+      },
+      "exportConfig": {
+        "format": "onnx",
+        "imgsz": 320,
+        "batch": 1,
+        "dynamic": false,
+        "simplify": false,
+        "opset": 17,
+        "nms": false,
+        "half": false,
+        "int8": false,
+        "device": "cpu"
+      },
+      "inputName": "images",
+      "inputShape": [
+        1,
+        3,
+        320,
+        320
+      ],
+      "inputDtype": "float32",
+      "outputName": "output0",
+      "outputShape": [
+        1,
+        34,
+        2100
+      ],
+      "outputDtype": "float32",
+      "outputLayout": "BCN:[1, 34, 2100] where C=[cx, cy, w, h, score_0..score_29]",
+      "confThres": 0.25,
+      "iouThres": 0.5,
+      "maxDet": 300,
+      "onnxMetadataProps": {
+        "description": "Ultralytics best_0608 model trained on data/mydataset.yaml",
+        "author": "Ultralytics",
+        "date": "2024-08-06T10:15:11.292164",
+        "version": "8.3.221",
+        "license": "AGPL-3.0 License (https://ultralytics.com/license)",
+        "docs": "https://docs.ultralytics.com",
+        "stride": "32",
+        "task": "detect",
+        "batch": "1",
+        "imgsz": "[320, 320]",
+        "names": "{0: '0', 1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6', 7: '7', 8: '8', 9: '9', 10: '10', 11: '11', 12: '12', 13: '13', 14: '14', 15: '15', 16: '16', 17: '17', 18: '18', 19: '19', 20: '20', 21: '21', 22: '22', 23: '23', 24: '24', 25: '25', 26: '26', 27: '27', 28: '28', 29: '29'}",
+        "args": "{'batch': 1, 'half': False, 'dynamic': False, 'simplify': False, 'opset': 17, 'nms': False}",
+        "channels": "3"
+      },
+      "exportParity": {
+        "samples": 4,
+        "maxAbsDelta": 0.0013580322265625,
+        "meanAbsDelta": 2.3115128442441346e-06,
+        "maxRelDelta": 0.00013726550969295204,
+        "atol": 0.0001,
+        "rtol": 0.0001,
+        "passed": true
+      },
+      "agnosticNms": true,
+      "mappingRule": "int(label) % 10",
+      "classToDigit": {
+        "0": "0",
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "4": "4",
+        "5": "5",
+        "6": "6",
+        "7": "7",
+        "8": "8",
+        "9": "9",
+        "10": "0",
+        "11": "1",
+        "12": "2",
+        "13": "3",
+        "14": "4",
+        "15": "5",
+        "16": "6",
+        "17": "7",
+        "18": "8",
+        "19": "9",
+        "20": "0",
+        "21": "1",
+        "22": "2",
+        "23": "3",
+        "24": "4",
+        "25": "5",
+        "26": "6",
+        "27": "7",
+        "28": "8",
+        "29": "9"
+      },
+      "sortOrder": "left_to_right_x1_then_cx_then_anchor"
+    },
+    "reverse": {
+      "file": "reverse.onnx",
+      "sha256": "e5b8c11e877b15f94618dbf014747478a091483a1731fd4a47b3fa839957984b",
+      "sizeBytes": 12116287,
+      "sourceFile": "models/best_1608.pt",
+      "sourceSha256": "17413d10235061c85a6da177b414b38eaaf73b1ab70ee74317cdb018a267fe25",
+      "sourceSizeBytes": 6216035,
+      "ckptUltralyticsVersion": "8.2.77",
+      "ckptDate": "2024-08-15T16:38:14.648661",
+      "task": "detect",
+      "imgsz": 320,
+      "trainImgsz": 320,
+      "stride": [
+        8,
+        16,
+        32
+      ],
+      "nc": 6,
+      "names": {
+        "0": "1n",
+        "1": "2n",
+        "2": "3n",
+        "3": "4n",
+        "4": "5n",
+        "5": "7n"
+      },
+      "modelClass": "DetectionModel",
+      "exportUltralyticsVersion": "8.3.221",
+      "opset": 17,
+      "opsetImports": {
+        "ai.onnx": 17
+      },
+      "exportConfig": {
+        "format": "onnx",
+        "imgsz": 320,
+        "batch": 1,
+        "dynamic": false,
+        "simplify": false,
+        "opset": 17,
+        "nms": false,
+        "half": false,
+        "int8": false,
+        "device": "cpu"
+      },
+      "inputName": "images",
+      "inputShape": [
+        1,
+        3,
+        320,
+        320
+      ],
+      "inputDtype": "float32",
+      "outputName": "output0",
+      "outputShape": [
+        1,
+        10,
+        2100
+      ],
+      "outputDtype": "float32",
+      "outputLayout": "BCN:[1, 10, 2100] where C=[cx, cy, w, h, score_0..score_5]",
+      "confThres": 0.25,
+      "iouThres": 0.5,
+      "maxDet": 300,
+      "onnxMetadataProps": {
+        "description": "Ultralytics best_1608 model trained on data/mydataset.yaml",
+        "author": "Ultralytics",
+        "date": "2024-08-15T16:38:14.648661",
+        "version": "8.3.221",
+        "license": "AGPL-3.0 License (https://ultralytics.com/license)",
+        "docs": "https://docs.ultralytics.com",
+        "stride": "32",
+        "task": "detect",
+        "batch": "1",
+        "imgsz": "[320, 320]",
+        "names": "{0: '1n', 1: '2n', 2: '3n', 3: '4n', 4: '5n', 5: '7n'}",
+        "args": "{'batch': 1, 'half': False, 'dynamic': False, 'simplify': False, 'opset': 17, 'nms': False}",
+        "channels": "3"
+      },
+      "exportParity": {
+        "samples": 4,
+        "maxAbsDelta": 0.000244140625,
+        "meanAbsDelta": 3.150003863083839e-06,
+        "maxRelDelta": 0.00013652915367856622,
+        "atol": 0.0001,
+        "rtol": 0.0001,
+        "passed": true
+      },
+      "agnosticNms": true,
+      "triggerRule": "any_asymmetric_or_at_least_two",
+      "asymmetricLabels": [
+        "2n",
+        "3n",
+        "4n",
+        "5n",
+        "7n"
+      ],
+      "symmetricLabels": [
+        "1n"
+      ],
+      "minTotalBoxesForSymmetricTrigger": 2,
+      "actionOnTrigger": "rotate_crop_180_then_run_digits"
+    }
+  },
+  "policy": {
+    "multipleFramesPolicy": "uncertain_multiple_rows",
+    "noFramePolicy": "uncertain_no_row",
+    "obbCropPolicy": "perspective_warp_long_edge_horizontal_no_margin",
+    "geometryBounds": {
+      "minWidth": 16,
+      "minHeight": 8,
+      "minAspect": 1.2,
+      "maxAspect": 25.0
+    },
+    "acceptedLengths": [
+      5,
+      6
+    ],
+    "preserveLeadingZeros": true
+  },
+  "tolerances": {
+    "rawTensorAtol": 0.0001,
+    "rawTensorRtol": 0.0001,
+    "rawCoordPxAtol": 0.01,
+    "rawScoreAtol": 0.0005,
+    "hostScoreAtol": 0.0005,
+    "hostBoxPxAtol": 0.05,
+    "androidBoxPxAtol": 0.5,
+    "rationale": "YOLOv8 DFL box channels (cx,cy,w,h) multiply 16-bin softmax expectations by stride (8..32), giving <=0.01px FP32 Conv+BN fusion delta in network space; sigmoid score/angle channels agree within 5e-4; post-NMS class labels, anchor indices, orientation, status, and final digit strings must match 100% with zero tolerance."
+  }
+}

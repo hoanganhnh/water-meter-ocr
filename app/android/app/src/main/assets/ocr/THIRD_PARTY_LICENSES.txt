@@ -1,0 +1,41 @@
+Water Meter OCR — Bundled OCR Assets & Runtime Notices (supplied-yolo-3stage-v1)
+================================================================================
+
+1. Bundled ONNX Models (`assets/ocr/`)
+--------------------------------------
+- `frame.onnx` (exported from supplied `models/best_latest.pt`, YOLOv8n-OBB)
+- `reverse.onnx` (exported from supplied `models/best_1608.pt`, YOLOv8n detect)
+- `digits.onnx` (exported from supplied `models/best_0608.pt`, YOLOv8n detect)
+- `supplied-yolo-manifest.json`
+
+These ONNX model files are deterministic FP32 opset-17 exports of the project-supplied
+water-meter checkpoints (`best_latest.pt`, `best_1608.pt`, `best_0608.pt`) trained with
+Ultralytics YOLOv8. Model architectures derive from Ultralytics YOLOv8 (AGPL-3.0 / Enterprise
+license terms apply per upstream Ultralytics licensing; weights are proprietary project
+deliverables supplied for this repository).
+
+2. Microsoft ONNX Runtime Android (`com.microsoft.onnxruntime:onnxruntime-android:1.20.0`)
+------------------------------------------------------------------------------------------
+MIT License
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+3. OpenCV Android (`org.opencv:opencv:4.12.0`)
+----------------------------------------------
+Apache License, Version 2.0
+Copyright (C) 2000-2024, Intel Corporation, Willow Garage Inc., Itseez Inc.,
+OpenCV Foundation, and contributors. All rights reserved.
+Licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
