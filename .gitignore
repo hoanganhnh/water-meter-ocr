@@ -1,0 +1,59 @@
+# Local Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+
+# Downloaded model binaries and raw evaluation evidence
+# Private field samples used for local model validation
+/data/*.jfif
+data/target-domain/images/
+models/target-domain/*.tflite
+models/target-domain/**/*.tflite
+models/target-domain/*.onnx
+models/target-domain/**/*.onnx
+models/target-domain/*.pt
+models/target-domain/**/*.pt
+models/target-domain/*.pth
+models/target-domain/**/*.pth
+models/seeed/*/*.tflite
+app/android/app/src/main/assets/ocr/*.onnx
+app/android/app/src/main/assets/ocr/row-characters.json
+artifacts/fp32/
+artifacts/int8/
+artifacts/target-domain/
+artifacts/android-parity/
+artifacts/auto-roi/
+artifacts/supplied-yolo/
+.cache/
+Ultralytics/
+
+# Mobile build output and signing material
+android/.gradle/
+android/app/build/
+android/app/*.keystore
+android/app/*.jks
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
+local.properties
+
+# Tests
+# Unit and e2e tests (local only)
+e2e/
+**/*.spec.ts
+**/*.spec.tsx
+**/*.spec.js
+**/*.spec.jsx
+**/*.spec.cjs
+**/*.spec.mjs
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.test.jsx
+**/*.test.cjs
+**/*.test.mjs
+**/__tests__/
+**/__mocks__
+/coverage
+plans
