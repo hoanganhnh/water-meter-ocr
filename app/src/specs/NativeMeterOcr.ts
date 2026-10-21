@@ -2,6 +2,8 @@ import type {TurboModule} from 'react-native';
 import {TurboModuleRegistry} from 'react-native';
 
 export interface Spec extends TurboModule {
+  startRealtime(): Promise<string>;
+  releaseRealtimeImage(uri: string): Promise<void>;
   runRuntimeSmoke(): Promise<string>;
   validateImage(uri: string): Promise<string>;
   runImageDiagnostic(uri: string): Promise<string>;

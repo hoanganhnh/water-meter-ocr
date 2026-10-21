@@ -1,6 +1,20 @@
 ﻿# Tích hợp YOLO vào native Android
 
-Pipeline `supplied-yolo-3stage-v1` dùng ba checkpoint được cung cấp để tìm khung số, xác định hướng và đọc chữ số. React Native phụ trách chọn ảnh/hiển thị; Kotlin xử lý ảnh và suy luận trên thiết bị. Android đã có triển khai; iOS hiện chỉ có scaffold.
+Pipeline `supplied-yolo-3stage-v1` dùng ba checkpoint được cung cấp để tìm khung số, xác định hướng và đọc chữ số. React Native phụ trách chụp/chọn ảnh và hiển thị; Kotlin xử lý ảnh và suy luận trên thiết bị. Android đã có triển khai; iOS hiện chỉ có scaffold.
+
+## Nhận ảnh từ camera hoặc thư viện
+
+Luồng realtime bổ sung: `MeterScreen.startRealtime()` → TurboModule mở `RealtimeMeterActivity` nội bộ → CameraX Preview/ImageAnalysis → RGBA Bitmap xoay theo `rotationDegrees` → `SuppliedYoloEngine.run` → `ReadingStability` → giữ frame ổn định → người dùng xác nhận → trả URI JPEG và JSON về React Native. Chụp ảnh và thư viện giữ đường xử lý riêng bên dưới.
+
+Activity sở hữu một executor/engine, không dùng session đồng thời với module ảnh tĩnh; module khóa các yêu cầu khác trong lúc scanner mở. Preview dùng FIT_CENTER; overlay live dùng `ImageProxyTransformFactory`/`CoordinateTransform`, overlay ảnh giữ dùng đúng tỷ lệ ảnh. Native không truyền frame hoặc tensor qua bridge. `STRATEGY_KEEP_ONLY_LATEST`, throttle 400 ms và giải phóng `ImageProxy` trong `finally` sau phân tích giữ hàng đợi hữu hạn, tránh xếp thêm tác vụ phân tích ảnh cũ sau lượt đang bận. Mỗi kết quả gắn generation; pause/reset/đóng hủy kết quả cũ. Chỉ ảnh xác nhận được lưu vào cache, trả `source=realtime`; hủy trả `cancelled=true`.
+
+`ReadingStability` kiểm tra chuỗi, hình học vùng chuẩn hóa, IoU với vùng neo, tuổi và đa số trong lịch sử tối đa 5 mẫu; kết quả ổn định được giữ cùng chính frame tạo ra nó để người dùng đối chiếu. Trạng thái quét không phải xác nhận độ chính xác hay kết quả nghiệp vụ đã được gửi đi. CameraX mới không thay checkpoint/manifest/decoder.
+
+`MeterScreen` dùng `react-native-image-crop-picker`: `openPicker` nhận ảnh thư viện; `openCamera` mở camera hệ thống bằng Android `ACTION_IMAGE_CAPTURE` và FileProvider. Thư viện yêu cầu quyền camera lúc chạy; manifest khai báo `CAMERA`, phần cứng camera/autofocus là tùy chọn để thiết bị chỉ dùng thư viện vẫn cài được app.
+
+Sau xác nhận, ảnh camera được thu nhỏ giữ tỷ lệ với cạnh tối đa 2.560 px, JPEG quality 0,95 và giữ EXIF hướng. Cả hai nguồn cùng đi qua `validateImage` → `runImageDiagnostic` → preview/overlay. Native nhận URI, không thêm model hoặc đường suy luận riêng cho camera. Đây là chụp từng ảnh; điều khiển preview và xác nhận thuộc ứng dụng camera của thiết bị.
+
+Một khóa nhận ảnh dùng chung chặn gọi camera/picker trùng nhau và chặn nhận ảnh mới khi OCR đang chạy. Hủy không tạo lỗi; từ chối quyền hoặc thiếu camera có thông báo và giữ đường thư viện. Ảnh trả về chỉ được xóa sau khi native hoàn tất; kết quả về sau unmount bị bỏ và dọn ảnh. Camera gốc/tệp dở trước khi Promise trả về do thư viện quản lý, không nằm trong quyền sở hữu URI của màn hình.
 
 ## Công nghệ và ranh giới
 
@@ -46,6 +60,8 @@ Ngưỡng confidence/IoU, giới hạn hình học và quy tắc nhãn được 
 [NativeMeterOcr.ts](../app/src/specs/NativeMeterOcr.ts) định nghĩa các lời gọi bất đồng bộ trả Promise chứa JSON string:
 
 - `validateImage`: kiểm tra ảnh trước khi nhận vào luồng UI.
+- `startRealtime`: mở scanner native, trả ảnh minh chứng/JSON khi xác nhận hoặc `cancelled=true` khi đóng.
+- `releaseRealtimeImage`: chỉ xóa JPEG `meter-realtime-*` trong cache riêng đã kiểm tra canonical path, không yêu cầu quyền lưu trữ Android cũ.
 - `runImageDiagnostic`: đường đọc ảnh thông thường; tên “diagnostic” vẫn trả kết quả nhận diện thật.
 - `runRuntimeSmoke`: kiểm tra ba session bằng input tổng hợp, không phải chỉ số đồng hồ.
 - `runImageParity`: đường Debug xuất tensor/metadata; Release từ chối bằng `E_PARITY_DISABLED`.

@@ -1,6 +1,10 @@
 package com.watermeterocr.ocr
 
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.BaseActivityEventListener
+import com.facebook.react.bridge.UiThreadUtil
+import android.app.Activity
+import android.content.Intent
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.annotations.ReactModule
 import android.graphics.Bitmap
@@ -33,8 +37,66 @@ class MeterOcrModule(context: ReactApplicationContext) : NativeMeterOcrSpec(cont
   private val inferenceActive = AtomicBoolean(false)
   private var engine: SuppliedYoloEngine? = null
   @Volatile private var invalidated = false
+  private var realtimePromise: Promise? = null
+  private val cameraResultListener = object : BaseActivityEventListener() {
+    override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+      if (requestCode != 7341) return
+      synchronized(lifecycleLock) {
+        val pending = realtimePromise
+        realtimePromise = null
+        inferenceActive.set(false)
+        val payload = data?.getStringExtra("reading")
+        if (pending != null && !invalidated) {
+          if (resultCode == Activity.RESULT_OK && payload != null) pending.resolve(payload)
+          else pending.resolve("{\"cancelled\":true}")
+        } else if (payload != null) {
+          // A React reload can dispose the recipient while camera is open.
+          val path = runCatching { Uri.parse(JSONObject(payload).getString("uri")).path }.getOrNull()
+          if (path != null) {
+            val file = File(path)
+            if (file.parentFile == reactApplicationContext.cacheDir && file.name.startsWith("meter-realtime-")) file.delete()
+          }
+        }
+        if (invalidated) reactApplicationContext.removeActivityEventListener(this)
+      }
+    }
+  }
+
+  init { context.addActivityEventListener(cameraResultListener) }
 
   override fun getName() = NAME
+
+  override fun releaseRealtimeImage(uri: String, promise: Promise) {
+    try {
+      val parsed = Uri.parse(uri)
+      require(parsed.scheme == "file") { "Expected a private realtime image" }
+      val file = File(requireNotNull(parsed.path)).canonicalFile
+      require(file.parentFile == reactApplicationContext.cacheDir.canonicalFile &&
+        file.name.startsWith("meter-realtime-") && file.extension == "jpg") { "Image is not owned by realtime scanner" }
+      check(!file.exists() || file.delete()) { "Could not release realtime image" }
+      promise.resolve(null)
+    } catch (error: Exception) { promise.reject("E_IMAGE_CLEANUP", error.message, error) }
+  }
+
+  override fun startRealtime(promise: Promise) {
+    synchronized(lifecycleLock) {
+      if (invalidated) { promise.reject("E_MODULE_CLOSED", "OCR module is shutting down"); return }
+      if (!inferenceActive.compareAndSet(false, true)) { promise.reject("E_BUSY", "OCR is busy"); return }
+      realtimePromise = promise
+    }
+    UiThreadUtil.runOnUiThread {
+      synchronized(lifecycleLock) {
+        if (invalidated) return@runOnUiThread
+        try {
+          val activity = reactApplicationContext.currentActivity ?: error("No foreground activity")
+          activity.startActivityForResult(Intent(activity, RealtimeMeterActivity::class.java), 7341)
+        } catch (error: Exception) {
+          realtimePromise = null; inferenceActive.set(false)
+          promise.reject("E_CAMERA_START", error.message, error)
+        }
+      }
+    }
+  }
 
   override fun runRuntimeSmoke(promise: Promise) {
     enqueue(promise) { runInference(null) }
@@ -197,6 +259,9 @@ class MeterOcrModule(context: ReactApplicationContext) : NativeMeterOcrSpec(cont
     synchronized(lifecycleLock) {
       if (invalidated) return
       invalidated = true
+      realtimePromise?.reject("E_MODULE_CLOSED", "OCR module is shutting down")
+      if (realtimePromise == null) reactApplicationContext.removeActivityEventListener(cameraResultListener)
+      realtimePromise = null
       inferenceExecutor.execute {
         try {
           engine?.close()
