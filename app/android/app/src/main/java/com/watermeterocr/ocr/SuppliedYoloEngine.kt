@@ -5,6 +5,7 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import com.watermeterocr.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import org.opencv.android.OpenCVLoader
@@ -32,7 +33,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
   private val config = parseAndValidateManifest(manifest)
 
   private val frameSession: OrtSession
-  private val reverseSession: OrtSession
+  private val reverseSession: OrtSession?
   private val digitsSession: OrtSession
 
   init {
@@ -48,8 +49,10 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       val frameFile = stageModelFile(config.frame.file, config.frame.sha256, config.frame.sizeBytes)
       openedFrame = environment.createSession(frameFile.absolutePath, options)
 
-      val reverseFile = stageModelFile(config.reverse.file, config.reverse.sha256, config.reverse.sizeBytes)
-      openedReverse = environment.createSession(reverseFile.absolutePath, options)
+      if (BuildConfig.OCR_REVERSE_ENABLED) {
+        val reverseFile = stageModelFile(config.reverse.file, config.reverse.sha256, config.reverse.sizeBytes)
+        openedReverse = environment.createSession(reverseFile.absolutePath, options)
+      }
 
       val digitsFile = stageModelFile(config.digits.file, config.digits.sha256, config.digits.sizeBytes)
       openedDigits = environment.createSession(digitsFile.absolutePath, options)
@@ -311,8 +314,8 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       val dummy320 = FloatArray(3 * SuppliedYoloDecoder.DETECT_IMG_SIZE * SuppliedYoloDecoder.DETECT_IMG_SIZE) {
         (config.padValue and 0xFF) / 255f
       }
-      val revOut = invoke(reverseSession, dummy320, detectShape)
-      require(revOut.shape.contentEquals(expectedRevOut)) { "Unexpected reverse detector output shape" }
+      val revOut = reverseSession?.let { invoke(it, dummy320, detectShape) }
+      if (revOut != null) require(revOut.shape.contentEquals(expectedRevOut)) { "Unexpected reverse detector output shape" }
       val digOut = invoke(digitsSession, dummy320, detectShape)
       require(digOut.shape.contentEquals(expectedDigitsOut)) { "Unexpected digits detector output shape" }
 
@@ -324,15 +327,16 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
         .put("preprocessVersion", config.preprocessVersion)
         .put("modelManifestSha256", manifestSha256)
         .put("frameModelSha256", config.frame.sha256)
+        .put("reverseEnabled", BuildConfig.OCR_REVERSE_ENABLED)
         .put("reverseModelSha256", config.reverse.sha256)
         .put("digitsModelSha256", config.digits.sha256)
         .put("inputShape", JSONArray(frameShape))
         .put("outputShape", JSONArray(frameOutput.shape))
-        .put("reverseInputShape", JSONArray(detectShape))
-        .put("reverseOutputShape", JSONArray(revOut.shape))
+        .put("reverseInputShape", if (revOut == null) JSONObject.NULL else JSONArray(detectShape))
+        .put("reverseOutputShape", revOut?.let { JSONArray(it.shape) } ?: JSONObject.NULL)
         .put("digitsInputShape", JSONArray(detectShape))
         .put("digitsOutputShape", JSONArray(digOut.shape))
-        .put("finiteOutputs", frameOutput.data.size + revOut.data.size + digOut.data.size)
+        .put("finiteOutputs", frameOutput.data.size + (revOut?.data?.size ?: 0) + digOut.data.size)
         .put("invokeMs", (System.nanoTime() - start) / 1_000_000.0)
         .put("inputSource", "synthetic")
         .put("source", "diagnostic")
@@ -385,28 +389,33 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       )
       cropRgb = warpedRgb
 
-      val (preparedRev, revMeta) = letterbox(warpedRgb, cropPlan.cropWidth, cropPlan.cropHeight, config.reverse.imgsz)
-      revInput = preparedRev
-      val rawRev = invoke(reverseSession, preparedRev, detectShape)
-      require(rawRev.shape.contentEquals(expectedRevOut)) { "Unexpected reverse detector output shape" }
-      revOutput = rawRev
+      val session = reverseSession
+      if (session != null) {
+        val (preparedRev, revMeta) = letterbox(warpedRgb, cropPlan.cropWidth, cropPlan.cropHeight, config.reverse.imgsz)
+        revInput = preparedRev
+        val rawRev = invoke(session, preparedRev, detectShape)
+        require(rawRev.shape.contentEquals(expectedRevOut)) { "Unexpected reverse detector output shape" }
+        revOutput = rawRev
 
-      revDetections = SuppliedYoloDecoder.decodeAxisAlignedBoxes(
-        rawOutput = rawRev.data,
-        anchors = SuppliedYoloDecoder.DETECT_ANCHORS,
-        meta = revMeta,
-        names = config.reverse.names,
-        confThres = config.reverse.confThres,
-        iouThres = config.reverse.iouThres,
-        agnosticNms = config.reverse.agnosticNms,
-        maxDet = config.reverse.maxDet,
-      )
-      revDecision = SuppliedYoloDecoder.evaluateReverseTrigger(
-        detections = revDetections,
-        asymmetricLabels = config.reverse.asymmetricLabels,
-        symmetricLabels = config.reverse.symmetricLabels,
-        minTotalBoxes = config.reverse.minTotalBoxesForSymmetricTrigger,
-      )
+        revDetections = SuppliedYoloDecoder.decodeAxisAlignedBoxes(
+          rawOutput = rawRev.data,
+          anchors = SuppliedYoloDecoder.DETECT_ANCHORS,
+          meta = revMeta,
+          names = config.reverse.names,
+          confThres = config.reverse.confThres,
+          iouThres = config.reverse.iouThres,
+          agnosticNms = config.reverse.agnosticNms,
+          maxDet = config.reverse.maxDet,
+        )
+        revDecision = SuppliedYoloDecoder.evaluateReverseTrigger(
+          detections = revDetections,
+          asymmetricLabels = config.reverse.asymmetricLabels,
+          symmetricLabels = config.reverse.symmetricLabels,
+          minTotalBoxes = config.reverse.minTotalBoxesForSymmetricTrigger,
+        )
+      } else {
+        revDecision = SuppliedYoloDecoder.ReverseDecision(false, "disabled_by_config", emptyList())
+      }
 
       val activeCrop = if (revDecision.isReversed) {
         SuppliedYoloDecoder.rotateRgb180(warpedRgb, cropPlan.cropWidth, cropPlan.cropHeight)
@@ -501,6 +510,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       .put("preprocessVersion", config.preprocessVersion)
       .put("modelManifestSha256", manifestSha256)
       .put("frameModelSha256", config.frame.sha256)
+      .put("reverseEnabled", BuildConfig.OCR_REVERSE_ENABLED)
       .put("reverseModelSha256", config.reverse.sha256)
       .put("digitsModelSha256", config.digits.sha256)
       .put("inputShape", JSONArray(frameShape))
@@ -584,7 +594,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
     var failure: Throwable? = null
     for (session in listOf(digitsSession, reverseSession, frameSession)) {
       try {
-        session.close()
+        session?.close()
       } catch (error: Throwable) {
         if (failure == null) failure = error
       }

@@ -6,6 +6,20 @@
 
 Các engine và model thử nghiệm trước đây (`YoloPpocrEngine`, `RowDecoder`, `RowPreprocess`, `AutoRowLocator`, `SwiftYoloDecoder`, `row-detector.onnx`, `row-recognizer.onnx`, `diagnostic-fp32.tflite`) đã được gỡ bỏ hoàn toàn khỏi source tree và APK. iOS vẫn ở trạng thái scaffold-only.
 
+## Cấu hình chiều ảnh Android
+
+Mặc định `ocrReverseEnabled=false` trong `android/gradle.properties`. Cả ảnh tĩnh
+và realtime bỏ qua `reverse.onnx`, không khởi tạo session reverse và không tự xoay
+crop 180°. Giữ đồng hồ đúng chiều, dãy số nằm ngang. File model vẫn được đóng gói.
+Kết quả có `reverseEnabled=false`; khi tìm được crop, `reverseTriggerReason` là
+`disabled_by_config` và input/output reverse là null.
+
+Để bật lại, đổi cấu hình thành `true` rồi build/cài lại, hoặc dùng
+`gradlew.bat :app:assembleRelease -PocrReverseEnabled=true` từ `app/android`.
+Manifest và công cụ Python vẫn mô tả pipeline ba bước gốc; đối chiếu parity ba bước
+cần build với `-PocrReverseEnabled=true`. Tắt reverse cần được đánh giá lại trên ảnh
+thật, chưa chứng minh đã sửa lỗi `000003 → 300000`.
+
 ## Hành vi nghiệp vụ & giao diện
 
 1. Người dùng chọn ảnh có sẵn (JPEG/JFIF/PNG/WebP), **Chụp ảnh đồng hồ**, hoặc **Nhận diện realtime**. Hai đường ảnh tĩnh tự chạy OCR sau xác nhận ảnh; realtime dùng màn hình quét riêng mô tả bên dưới.

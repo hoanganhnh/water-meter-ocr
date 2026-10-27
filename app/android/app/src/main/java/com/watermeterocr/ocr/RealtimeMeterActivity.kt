@@ -94,7 +94,7 @@ class RealtimeMeterActivity : ComponentActivity() {
       FrameLayout.LayoutParams(-1, -1))
     root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
     status = TextView(this).apply {
-      text = "Đưa gần toàn bộ dãy số, giữ yên khoảng 2–3 giây. Chạm ảnh để lấy nét."
+      text = "Giữ đồng hồ đúng chiều, dãy số nằm ngang. Đưa gần và giữ yên 2–3 giây. Chạm ảnh để lấy nét."
       textSize = 17f; setTextColor(Color.WHITE); setPadding(8, 12, 8, 12)
       accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
@@ -150,7 +150,7 @@ class RealtimeMeterActivity : ComponentActivity() {
     frozenImage.setImageDrawable(null); frozenImage.visibility = View.GONE
     frozenBitmap?.recycle(); frozenBitmap = null; frozenResult = null
     confirm.isEnabled = false; overlay.box = null; overlay.invalidate()
-    status.text = "Đưa gần toàn bộ dãy số, giữ yên khoảng 2–3 giây. Chạm ảnh để lấy nét."
+    status.text = "Giữ đồng hồ đúng chiều, dãy số nằm ngang. Đưa gần và giữ yên 2–3 giây. Chạm ảnh để lấy nét."
   }
 
   override fun onStart() { super.onStart(); active = true; resetScan() }

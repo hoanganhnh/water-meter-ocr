@@ -91,6 +91,7 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "OCR_REVERSE_ENABLED", providers.gradleProperty("ocrReverseEnabled").orElse("false").get().toBoolean().toString()
     }
     sourceSets { androidTest.assets.srcDirs += [rootProject.file("../../.cache/android-gates-assets")] }
     packaging {

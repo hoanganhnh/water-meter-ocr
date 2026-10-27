@@ -158,7 +158,7 @@ export default function MeterScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.kicker}>WATER METER</Text>
         <Text style={styles.title}>Đọc ảnh</Text>
-        <Text style={styles.body}>Chụp ảnh, chọn ảnh hoặc quét realtime. Ứng dụng hoàn toàn chạy offline.</Text>
+        <Text style={styles.body}>Chụp ảnh, chọn ảnh hoặc quét realtime. Giữ đồng hồ đúng chiều, dãy số nằm ngang. Ứng dụng hoàn toàn chạy offline.</Text>
         <Pressable testID="choose-photo" accessibilityRole="button" onPress={() => chooseAndRead('gallery')} disabled={pickerBusy || state.status === 'busy' || Platform.OS !== 'android'} style={({pressed}) => [styles.button, pressed && styles.pressed, (pickerBusy || state.status === 'busy' || Platform.OS !== 'android') && styles.disabled]}>
           <Text style={styles.buttonText}>{Platform.OS !== 'android' ? 'Android hiện tại · iPhone ở phase 6' : pickerBusy ? 'Đang mở ảnh…' : state.status === 'busy' ? 'Đang tìm và đọc vùng số…' : photo ? 'Chọn ảnh khác' : 'Chọn ảnh từ thư viện'}</Text>
         </Pressable>
