@@ -20,32 +20,39 @@ flowchart TD
 
 ---
 
-## 2. Luồng quét Camera Realtime (Tự động bắt số)
+## 2. Luồng quét Camera Realtime (Tự động bắt số & Giữ ảnh chủ động)
 
-Dành cho trường hợp người dùng mở camera đưa vào đồng hồ để máy tự động nhận diện và chốt ảnh:
+Dành cho trường hợp người dùng mở camera đưa vào đồng hồ để máy tự động nhận diện hoặc chủ động bấm giữ ảnh:
 
 ```mermaid
 flowchart TD
-    A["1. Mở Camera đưa vào đồng hồ (Chạy ngầm mượt, không giật màn hình)"] --> B{"2. AI tìm khung dãy số"}
-    B -->|"Chưa thấy / Để máy quá xa"| GUIDE["Nhắc: Đưa điện thoại lại gần dãy số hơn"]
+    A["1. Mở Camera đưa vào đồng hồ (Nạp trước engine trên worker, giữ frame mới nhất)"] --> B{"2. AI tìm khung dãy số"}
+    B -->|"Chưa thấy / Nhiều đồng hồ / Để quá xa"| GUIDE["Nhắc đưa gần một dãy số rõ, xóa lịch sử vùng cũ"]
     GUIDE --> A
 
-    B -->|"Đã thấy rõ khung số"| C["3. AI đọc dãy số (Tự nhận biết cả số đang quay dở giữa 2 mức)"]
-    C --> D{"4. Kiểm tra chắc chắn trước khi chốt"}
-    D -->|"Tay còn rung / Chưa đủ 6 số / Mới khớp 1 lần"| WAIT["Hiện trạng thái: Đang xác nhận... giữ yên máy"]
-    WAIT --> A
+    B -->|"Thấy đúng 1 khung số hợp lệ"| C["3. AI đọc dãy số & đánh giá ReadingQuality (HIGH / MODERATE / LOW)"]
+    C --> D{"4. Cổng giữ ảnh tự động hoặc Giữ ảnh thủ công"}
+    D -->|"Chưa đủ ngưỡng chốt (hoặc có mâu thuẫn)"| WAIT["Hiện trạng thái & bật 'Giữ ảnh' (tối đa 1500 ms nếu đủ 6 số hợp lệ)"]
+    WAIT -->|"Đọc tiếp frame mới"| A
+    WAIT -->|"Người dùng bấm 'Giữ ảnh'"| E
 
-    D -->|"Tay giữ yên & đọc khớp >= 2 lần liên tiếp"| E["5. Tự động giữ lại bức ảnh nét nhất kèm chỉ số"]
-    E --> F{"6. Người dùng kiểm tra lại"}
-    F -->|"Đúng chỉ số"| OK["Bấm 'Dùng chỉ số này' -> Lưu kết quả"]
-    F -->|"Muốn quét lại"| RETRY["Bấm 'Quét lại' -> Tiếp tục quét ngay"]
+    D -->|"HIGH sạch ngay frame đầu HOẶC MODERATE khớp >= 2 lần cùng vùng"| E["5. Giữ đúng Bitmap của lượt suy luận đó & dựng báo cáo JSON/SHA-256 đúng 1 lần"]
+    E --> F{"6. Người dùng đối chiếu thủ công"}
+    F -->|"Đúng chỉ số"| OK["Bấm 'Dùng chỉ số này' -> Ghi JPEG cache & trả kết quả về RN"]
+    F -->|"Muốn quét lại"| RETRY["Bấm 'Quét lại' -> Tăng generation, hủy kết quả cũ & quét tiếp"]
 ```
 
-### Vì sao luồng Realtime hoạt động ổn định?
-- **Không chốt vội khi tay còn di chuyển:** Máy chỉ tự dừng ảnh khi bạn giữ yên điện thoại và AI đọc ra **cùng một dãy số ít nhất 2 lần liên tiếp**.
-- **Không đọc thiếu chữ số (5 số thay vì 6 số):** Máy kiểm tra khoảng cách đều nhau giữa các chữ số; nếu đã nhìn thấy đồng hồ 6 số thì sẽ bỏ qua các khung hình bị lóa/mất 1 số.
-- **Xử lý được đồng hồ đang nhảy số (cắt nửa giữa 4 và 5):** Khi vòng quay cơ học nằm lưng chừng giữa 2 số, AI tự gộp tín hiệu ở vị trí đó để đọc ra chữ số hợp lý nhất thay vì bỏ trống.
-- **Màn hình luôn mượt khi lia máy:** Việc phân tích AI chạy hoàn toàn ở luồng nền và chỉ lấy khung hình mới nhất, không làm đơ hay chớp đen màn hình camera.
+### Quy tắc cổng chất lượng, nhịp phân tích và giới hạn nghiệm thu
+- **Giữ ngay frame chất lượng cao (`HIGH`), đối chiếu theo cặp ở mức vừa (`MODERATE`):**
+  - `HIGH` (chữ số yếu nhất `>= 0.90`, trung bình `>= 0.95`, điểm khung `>= 0.85`, không có lớp chuyển tiếp `>= 10`, polygon gốc trước clamp nằm trong ảnh với dung sai `0.5 px`) tự giữ ngay ở quan sát đầu tiên nếu không có chuỗi hợp lệ mâu thuẫn trước đó.
+  - `MODERATE` (chữ số `>= 0.65`, trung bình `>= 0.80`, khung `>= 0.60`, hoặc chữ số cuối đang chuyển tiếp hợp lệ) cần **2 quan sát trùng khớp** trên cùng vùng mục tiêu (IoU `>= 0.55` với vùng neo và `>= 0.65` với frame liền trước) trong cửa sổ thích ứng `clamp(3 * EWMA, 3000, 10000) ms` mà không ép chờ cố định 800 ms. Nếu lịch sử trong 5 mẫu gần nhất có chuỗi khác nhau, hệ thống yêu cầu xác nhận lại liên tiếp/đa số trước khi chốt.
+  - `LOW` và `INVALID` không bao giờ tự chốt. Một frame `LOW` có cùng vùng hợp lệ chỉ bảo toàn ứng viên tối đa `1200 ms` qua nhịp mờ ngắn mà không cộng phiếu; mất vùng, nhiều vùng, lệch mục tiêu, hình học lỗi, timestamp camera trùng/lùi hoặc đổi `generation` (pause/reset/đóng) đều xóa sạch lịch sử.
+- **Giữ ảnh thủ công (`Giữ ảnh`) và xác nhận thủ công (`Dùng chỉ số này`):**
+  - Khi frame mới nhất đạt `status = "ok"` với đủ 6 chữ số và hình học hợp lệ (kể cả mức `LOW`/`MODERATE`), nút **Giữ ảnh** được bật tối đa `1500 ms` trên luồng chính để người dùng chủ động giữ ngay ảnh đang hiển thị.
+  - Cả tự động giữ lẫn **Giữ ảnh** đều không tự gửi chỉ số hay ghi JPEG sớm. Chỉ khi người dùng bấm **Dùng chỉ số này**, ứng dụng mới nén đúng `Bitmap` đang giữ thành JPEG trong `cacheDir` và trả `{uri, width, height, size, result}` (`source = "realtime"`).
+- **Không đọc thiếu chữ số & xử lý vòng quay đang nhảy:** Kiểm tra bước nhảy ngang/cao độ giữa các ký tự; nếu đã thấy mặt đồng hồ 6 số thì chặn kết quả 5 số bị khuyết, đồng thời gộp tín hiệu khi vòng quay cơ học nằm lưng chừng giữa 2 số (không tự bịa hay đệm số `0` đầu bị model bỏ sót).
+- **Đường chạy nền nhẹ và nhịp thích ứng:** `SuppliedYoloEngine` được khởi tạo sớm trên `worker` trước khi gắn analyzer (`STRATEGY_KEEP_ONLY_LATEST`). Nhịp bắt đầu phân tích thích ứng theo EWMA thời gian xử lý thực tế (`khởi đầu 200 ms`, `clamp(1.25 * EWMA, 150, 400) ms`, `alpha = 0.25`). Các frame bị bỏ qua chỉ giữ dữ liệu nhẹ `RealtimeFrame`; báo cáo JSON chi tiết và mã băm pixel SHA-256 chỉ được tính một lần cho frame được giữ mà không chạy lại model.
+- **Lưu ý độ chính xác thực địa:** Ngưỡng điểm hiện tại là cấu hình khởi tạo bảo thủ, chưa phải xác suất đúng đã hiệu chỉnh. Một frame điểm cao hoặc 5 chữ số hợp lệ vẫn có thể đọc sai trên cảnh lóa/mờ thực tế, nên bước đối chiếu thủ công luôn được giữ và việc hiệu chỉnh ngưỡng/độ trễ cần đo trên bộ mẫu camera có nhãn chuẩn.
 
 ---
 
