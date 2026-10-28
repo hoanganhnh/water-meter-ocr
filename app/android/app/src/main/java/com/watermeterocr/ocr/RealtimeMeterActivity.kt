@@ -36,6 +36,7 @@ class RealtimeMeterActivity : ComponentActivity() {
   private lateinit var frozenImage: ImageView
   private lateinit var overlay: RowOverlay
   private lateinit var status: TextView
+  private lateinit var hold: Button
   private lateinit var confirm: Button
   private lateinit var retry: Button
   @Volatile private var active = false
@@ -49,6 +50,22 @@ class RealtimeMeterActivity : ComponentActivity() {
   private var workerGeneration = -1
   private var frozenBitmap: Bitmap? = null // Main thread owned.
   private var frozenResult: JSONObject? = null
+  // Main owns one candidate. Its lazy report is evaluated only on worker after selection.
+  private data class ManualCandidate(
+    val token: Int,
+    val bitmap: Bitmap,
+    val evidence: SuppliedYoloEngine.RealtimeFrame,
+    val box: RectF?,
+    val analysisMs: Long,
+    val expiresAt: Long,
+  )
+  private var manualCandidate: ManualCandidate? = null
+  private var manualExpiry: Runnable? = null
+  private data class LiveUpdate(val token: Int, val bitmap: Bitmap?, val render: () -> Unit)
+  private var pendingLiveUpdate: LiveUpdate? = null // scanLock owns the worker-to-main slot.
+  private var liveUpdatePosted = false
+  private var liveUpdateVersion = 0L
+  private var displayedLiveUpdateVersion = 0L
   private var torch = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -120,8 +137,13 @@ class RealtimeMeterActivity : ComponentActivity() {
       accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
     root.addView(status)
+    hold = Button(this).apply {
+      text = "Giữ ảnh"; isEnabled = false; setOnClickListener { holdReading() }
+    }
+    root.addView(hold)
     confirm = Button(this).apply {
-      text = "Dùng chỉ số này"; isEnabled = false; setOnClickListener { acceptReading() }
+      text = "Dùng chỉ số này"; isEnabled = false; visibility = View.GONE
+      setOnClickListener { acceptReading() }
     }
     root.addView(confirm)
     retry = Button(this).apply {
@@ -172,11 +194,18 @@ class RealtimeMeterActivity : ComponentActivity() {
   }
 
   private fun resetScan() {
-    synchronized(scanLock) { generation++; frozen = false; scanStartedMs = SystemClock.elapsedRealtime() }
+    synchronized(scanLock) {
+      generation++; frozen = false; scanStartedMs = SystemClock.elapsedRealtime()
+      pendingLiveUpdate?.bitmap?.recycle(); pendingLiveUpdate = null
+      liveUpdateVersion = 0L; displayedLiveUpdateVersion = 0L
+    }
+    clearManualCandidate()
     // The worker clears its own evidence on generation change before cadence checks.
     frozenImage.setImageDrawable(null); frozenImage.visibility = View.GONE
     frozenBitmap?.recycle(); frozenBitmap = null; frozenResult = null
-    confirm.isEnabled = false; overlay.box = null; overlay.frozenSize = null; overlay.invalidate()
+    hold.visibility = View.VISIBLE
+    confirm.isEnabled = false; confirm.visibility = View.GONE
+    overlay.box = null; overlay.frozenSize = null; overlay.invalidate()
     updateStatus("Đưa gần toàn bộ dãy số, giữ đúng chiều và tránh lóa. Chạm ảnh để lấy nét.")
   }
 
@@ -274,11 +303,20 @@ class RealtimeMeterActivity : ComponentActivity() {
         bitmap = null
       } else {
         val digits = evidence.reading.rawDigits
+        val manualEligible = digits?.matches(SIX_DIGITS) == true &&
+          observation.quality != ReadingQualityLevel.INVALID
+        val manualEvidence = if (manualEligible) evidence else null
         val pending = stability.pendingDigits
         val reason = evidence.reading.reason
         val tooSmall = box != null && (evidence.cropPlan.cropWidth < 130 || evidence.cropPlan.cropHeight < 24)
-        runOnUiThread {
-          if (!active || token != generation || destroyed || isFinishing || frozen) return@runOnUiThread
+        if (manualEligible) bitmap = null
+        postLiveUpdate(token, if (manualEligible) rotated else null) {
+          if (!active || token != generation || destroyed || isFinishing || frozen) {
+            if (manualEligible) rotated.recycle()
+            return@postLiveUpdate
+          }
+          if (manualEvidence != null) offerManualReading(token, rotated, manualEvidence, box, now, inferredAt)
+          else clearManualCandidate()
           overlay.box = null; overlay.frozenSize = null
           val target = preview.outputTransform
           if (box != null && target != null) {
@@ -287,6 +325,7 @@ class RealtimeMeterActivity : ComponentActivity() {
           }
           updateStatus(when {
             tooSmall -> "Đồng hồ còn xa · đưa điện thoại lại gần dãy số hơn."
+            manualCandidate != null -> "Đã đọc: $digits · bấm Giữ ảnh hoặc giữ yên để tự giữ."
             pending != null -> "Đang xác nhận: $pending · giữ yên máy để lấy nét rõ…"
             digits != null -> "Đang kiểm tra: $digits · giữ rõ toàn bộ 6 chữ số…"
             reason == "multiple_rows" -> "Có nhiều đồng hồ. Đưa gần một dãy số."
@@ -300,8 +339,10 @@ class RealtimeMeterActivity : ComponentActivity() {
       if (reserved) synchronized(scanLock) { if (token == generation) frozen = false }
       android.util.Log.w("RealtimeMeter", "Frame analysis failed", error)
       stability.reset()
+      clearPendingLiveUpdate()
       runOnUiThread {
         if (active && token == generation && !destroyed && !frozen) {
+          clearManualCandidate()
           overlay.box = null; overlay.invalidate()
           updateStatus("Chưa xử lý được camera. Bấm Quét lại hoặc đóng để chọn ảnh.")
         }
@@ -317,21 +358,151 @@ class RealtimeMeterActivity : ComponentActivity() {
     }
   }
 
-  /** Main-thread handoff also owns disposal of rejected evidence. */
-  private fun showFrozenReading(token: Int, bitmap: Bitmap, result: JSONObject, box: RectF?): Boolean {
+  /** Coalesce handoffs so a busy main thread cannot queue an unbounded number of bitmaps. */
+  private fun postLiveUpdate(token: Int, bitmap: Bitmap?, render: () -> Unit) {
+    val post = synchronized(scanLock) {
+      if (!active || token != generation || destroyed || frozen) {
+        bitmap?.recycle(); return
+      }
+      pendingLiveUpdate?.bitmap?.recycle()
+      pendingLiveUpdate = LiveUpdate(token, bitmap, render)
+      liveUpdateVersion++
+      if (liveUpdatePosted) false else { liveUpdatePosted = true; true }
+    }
+    if (post) runOnUiThread {
+      val delivery = synchronized(scanLock) {
+        val next = pendingLiveUpdate
+        pendingLiveUpdate = null; liveUpdatePosted = false
+        next?.let { it to liveUpdateVersion }
+      } ?: return@runOnUiThread
+      val (update, version) = delivery
+      // Main owns delivery from here; a click can detect a newer completed result under scanLock.
+      displayedLiveUpdateVersion = version
+      if (!active || update.token != generation || destroyed || isFinishing || frozen) update.bitmap?.recycle()
+      else update.render()
+    }
+  }
+
+  private fun clearPendingLiveUpdate() {
+    synchronized(scanLock) {
+      pendingLiveUpdate?.bitmap?.recycle(); pendingLiveUpdate = null
+    }
+  }
+
+  /** Main takes ownership even when rejecting. Keep the box in source-image coordinates. */
+  private fun offerManualReading(
+    token: Int,
+    bitmap: Bitmap,
+    evidence: SuppliedYoloEngine.RealtimeFrame,
+    box: RectF?,
+    startedAt: Long,
+    finishedAt: Long,
+  ): Boolean {
+    if (!active || token != generation || destroyed || isFinishing || frozen) {
+      bitmap.recycle(); return false
+    }
+    clearManualCandidate()
+    val age = SystemClock.elapsedRealtime() - finishedAt
+    val reading = evidence.reading
+    val quality = ReadingQuality.evaluate(reading, evidence.cropPlan, evidence.frameDetections,
+      evidence.width, evidence.height)
+    if (reading.status != "ok" || reading.rawDigits?.matches(SIX_DIGITS) != true ||
+      reading.sortedDetections.size != 6 || quality.quality == ReadingQualityLevel.INVALID ||
+      bitmap.width != evidence.width || bitmap.height != evidence.height ||
+      age < 0 || age >= MANUAL_CANDIDATE_TTL_MS) {
+      bitmap.recycle(); return false
+    }
+    val candidate = ManualCandidate(token, bitmap, evidence, box?.let { RectF(it) },
+      (finishedAt - startedAt).coerceAtLeast(0), finishedAt + MANUAL_CANDIDATE_TTL_MS)
+    manualCandidate = candidate
+    hold.isEnabled = true
+    val expiry = Runnable {
+      if (manualCandidate === candidate) {
+        clearManualCandidate()
+        if (active && token == generation && !frozen)
+          updateStatus("Kết quả đã cũ · giữ rõ dãy số để đọc lại.")
+      }
+    }
+    manualExpiry = expiry
+    hold.postDelayed(expiry, (candidate.expiresAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+    return true
+  }
+
+  private fun clearManualCandidate(recycle: Boolean = true) {
+    manualExpiry?.let { hold.removeCallbacks(it) }; manualExpiry = null
+    if (recycle) manualCandidate?.bitmap?.recycle()
+    manualCandidate = null
+    hold.isEnabled = false
+  }
+
+  /** Hold the selected bitmap immediately; full reporting stays off main and does not re-infer. */
+  private fun holdReading() {
+    val candidate = manualCandidate ?: return
+    val selected = synchronized(scanLock) {
+      if (active && !destroyed && !isFinishing && !frozen && candidate.token == generation &&
+        liveUpdateVersion == displayedLiveUpdateVersion &&
+        SystemClock.elapsedRealtime() < candidate.expiresAt) {
+        frozen = true; true
+      } else false
+    }
+    if (!selected) {
+      clearManualCandidate()
+      if (!frozen) updateStatus("Đang cập nhật dãy số · chờ ảnh mới nhất.")
+      return
+    }
+    clearManualCandidate(recycle = false)
+    if (!showFrozenPreview(candidate.token, candidate.bitmap, candidate.box)) return
+    updateStatus("Đã giữ ảnh · đang chuẩn bị chỉ số để đối chiếu…")
+    try {
+      worker.execute {
+        try {
+          val started = SystemClock.elapsedRealtime()
+          val result = candidate.evidence.report().put("source", "realtime")
+            .put("totalMs", candidate.analysisMs + SystemClock.elapsedRealtime() - started)
+          runOnUiThread { publishFrozenReading(candidate.token, candidate.bitmap, result) }
+        } catch (error: Exception) {
+          android.util.Log.w("RealtimeMeter", "Held-frame reporting failed", error)
+          runOnUiThread {
+            if (active && candidate.token == generation && frozenBitmap === candidate.bitmap)
+              updateStatus("Không chuẩn bị được chỉ số. Bấm Quét lại để thử lại.")
+          }
+        }
+      }
+    } catch (_: java.util.concurrent.RejectedExecutionException) {
+      updateStatus("Không chuẩn bị được chỉ số. Bấm Quét lại để thử lại.")
+    }
+  }
+
+  private fun showFrozenPreview(token: Int, bitmap: Bitmap, box: RectF?): Boolean {
     synchronized(scanLock) {
       if (!active || token != generation || destroyed || isFinishing || frozenBitmap != null) {
         bitmap.recycle(); return false
       }
       frozen = true
-      frozenBitmap = bitmap; frozenResult = result
+      frozenBitmap = bitmap; frozenResult = null
     }
+    clearManualCandidate()
+    clearPendingLiveUpdate()
     frozenImage.setImageBitmap(bitmap); frozenImage.visibility = View.VISIBLE
     overlay.frozenSize = Size(bitmap.width, bitmap.height); overlay.box = box
-    confirm.isEnabled = true
-    updateStatus("Đã giữ ảnh: ${result.optString("rawDigits")}\nĐối chiếu chỉ số với ảnh trước khi xác nhận.")
+    hold.visibility = View.GONE
+    confirm.isEnabled = false; confirm.visibility = View.GONE
     overlay.invalidate()
     return true
+  }
+
+  private fun publishFrozenReading(token: Int, bitmap: Bitmap, result: JSONObject): Boolean {
+    if (!active || token != generation || destroyed || isFinishing || frozenBitmap !== bitmap) return false
+    frozenResult = result
+    confirm.visibility = View.VISIBLE; confirm.isEnabled = true
+    updateStatus("Đã giữ ảnh: ${result.optString("rawDigits")}\nĐối chiếu chỉ số với ảnh trước khi xác nhận.")
+    return true
+  }
+
+  /** Main-thread handoff also owns disposal of rejected evidence. */
+  private fun showFrozenReading(token: Int, bitmap: Bitmap, result: JSONObject, box: RectF?): Boolean {
+    if (!showFrozenPreview(token, bitmap, box)) return false
+    return publishFrozenReading(token, bitmap, result)
   }
 
   private fun acceptReading() {
@@ -351,6 +522,8 @@ class RealtimeMeterActivity : ComponentActivity() {
 
   override fun onDestroy() {
     synchronized(scanLock) { active = false; destroyed = true; cameraBound = false; generation++; frozen = false }
+    clearPendingLiveUpdate()
+    clearManualCandidate()
     if (::camera.isInitialized) { camera.clearImageAnalysisAnalyzer(); camera.unbind() }
     frozenImage.setImageDrawable(null); frozenBitmap?.recycle(); frozenBitmap = null
     try {
@@ -362,6 +535,11 @@ class RealtimeMeterActivity : ComponentActivity() {
       worker.shutdown()
     }
     super.onDestroy()
+  }
+
+  private companion object {
+    val SIX_DIGITS = Regex("[0-9]{6}")
+    const val MANUAL_CANDIDATE_TTL_MS = 1500L
   }
 
   private inner class RowOverlay : View(this@RealtimeMeterActivity) {
