@@ -22,7 +22,7 @@ import java.security.MessageDigest
 import java.util.UUID
 
 /**
- * Owned exclusively by MeterOcrModule's serial executor. Manages the three ONNX Runtime sessions
+ * Owned exclusively by its caller's serial executor. Manages the three ONNX Runtime sessions
  * (`frame.onnx`, `reverse.onnx`, `digits.onnx`) and OpenCV image operations offline on device.
  */
 class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
@@ -283,7 +283,38 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
     }
   }
 
-  fun run(bitmap: Bitmap, synthetic: Boolean, saveParity: Boolean): String {
+  internal interface ReportOutput {
+    fun report(): JSONObject
+  }
+
+  /** A single inference's evidence. Rejected live frames never materialize the detailed report. */
+  internal class RealtimeFrame internal constructor(
+    val width: Int,
+    val height: Int,
+    val reading: SuppliedYoloDecoder.DigitReading,
+    val cropPlan: SuppliedYoloDecoder.CropPlan,
+    val frameDetections: List<SuppliedYoloDecoder.FrameDetection>,
+    buildReport: () -> JSONObject,
+  ) : ReportOutput {
+    // Worker owned. Once evaluated, Lazy releases its initializer and the captured RGB buffers.
+    private val detailedReport by lazy(LazyThreadSafetyMode.NONE, buildReport)
+    override fun report(): JSONObject = detailedReport
+  }
+
+  private class DiagnosticReport(private val value: JSONObject) : ReportOutput {
+    override fun report(): JSONObject = value
+  }
+
+  fun run(bitmap: Bitmap, synthetic: Boolean, saveParity: Boolean): String =
+    execute(bitmap, synthetic, saveParity).report().toString()
+
+  internal fun runRealtime(bitmap: Bitmap): RealtimeFrame {
+    val result = execute(bitmap, synthetic = false, saveParity = false)
+    check(result is RealtimeFrame)
+    return result
+  }
+
+  private fun execute(bitmap: Bitmap, synthetic: Boolean, saveParity: Boolean): ReportOutput {
     val width = bitmap.width
     val height = bitmap.height
     val rgb = ByteArray(width * height * 3)
@@ -319,7 +350,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       val digOut = invoke(digitsSession, dummy320, detectShape)
       require(digOut.shape.contentEquals(expectedDigitsOut)) { "Unexpected digits detector output shape" }
 
-      return JSONObject()
+      return DiagnosticReport(JSONObject()
         .put("runtime", config.runtime)
         .put("pipelineId", config.pipelineId)
         .put("semanticsVersion", config.semanticsVersion)
@@ -346,8 +377,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
         .put("reason", JSONObject.NULL)
         .put("confidence", 0.0)
         .put("rowBox", JSONObject.NULL)
-        .put("imageSize", JSONArray(intArrayOf(width, height)))
-        .toString()
+        .put("imageSize", JSONArray(intArrayOf(width, height))))
     }
 
     val frameDetections = SuppliedYoloDecoder.decodeFrameObb(
@@ -430,7 +460,7 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       require(rawDigits.shape.contentEquals(expectedDigitsOut)) { "Unexpected digits detector output shape" }
       digitsOutput = rawDigits
 
-      val digitDetections = SuppliedYoloDecoder.decodeAxisAlignedBoxes(
+      val primaryDigitDetections = SuppliedYoloDecoder.decodeAxisAlignedBoxes(
         rawOutput = rawDigits.data,
         anchors = SuppliedYoloDecoder.DETECT_ANCHORS,
         meta = digitsMeta,
@@ -440,6 +470,19 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
         agnosticNms = config.digits.agnosticNms,
         maxDet = config.digits.maxDet,
       )
+      val digitDetections = if (!saveParity && primaryDigitDetections.size == 5) {
+        SuppliedYoloDecoder.recoverMissingRollerDigit(
+          rawOutput = rawDigits.data,
+          anchors = SuppliedYoloDecoder.DETECT_ANCHORS,
+          meta = digitsMeta,
+          names = config.digits.names,
+          primaryDetections = primaryDigitDetections,
+          cropWidth = cropPlan.cropWidth,
+          cropHeight = cropPlan.cropHeight,
+        )
+      } else {
+        primaryDigitDetections
+      }
       reading = SuppliedYoloDecoder.decodeDigitsReading(
         detections = digitDetections,
         classToDigit = config.digits.classToDigit,
@@ -447,125 +490,142 @@ class SuppliedYoloEngine(private val context: Context) : AutoCloseable {
       )
     }
 
-    val frameDetectionsJson = JSONArray()
-    frameDetections.forEach { d ->
-      val polyJson = JSONArray()
-      d.polygon.forEach { pt -> polyJson.put(JSONArray(pt)) }
-      frameDetectionsJson.put(
-        JSONObject()
-          .put("anchor", d.anchor)
-          .put("classId", d.classId)
-          .put("class", d.label)
-          .put("score", d.score.toDouble())
-          .put("netObb", JSONArray(d.netObb))
-          .put("polygon", polyJson)
-      )
-    }
-
-    val revDetectionsJson = JSONArray()
-    revDetections.forEach { d ->
-      revDetectionsJson.put(
-        JSONObject()
-          .put("anchor", d.anchor)
-          .put("classId", d.classId)
-          .put("class", d.label)
-          .put("score", d.score.toDouble())
-          .put("box", JSONArray(d.box))
-          .put("cx", d.cx.toDouble())
-          .put("cy", d.cy.toDouble())
-      )
-    }
-
-    val digitDetectionsJson = JSONArray()
-    reading.sortedDetections.forEach { d ->
-      digitDetectionsJson.put(
-        JSONObject()
-          .put("anchor", d.anchor)
-          .put("classId", d.classId)
-          .put("class", d.label)
-          .put("digit", d.digit ?: JSONObject.NULL)
-          .put("score", d.score.toDouble())
-          .put("box", JSONArray(d.box))
-          .put("cx", d.cx.toDouble())
-          .put("cy", d.cy.toDouble())
-      )
-    }
-
-    val orderedPolygonJson = cropPlan.orderedPolygon?.let { poly ->
-      JSONArray().also { arr -> poly.forEach { pt -> arr.put(JSONArray(pt)) } }
-    } ?: JSONObject.NULL
-
-    val cropSizeJson = if (cropPlan.cropWidth > 0 && cropPlan.cropHeight > 0) {
-      JSONArray(intArrayOf(cropPlan.cropWidth, cropPlan.cropHeight))
-    } else {
-      JSONObject.NULL
-    }
-
+    // Copy only scalar/shape metadata into the lazy report. Raw tensors are retained only for parity.
+    val pipelineNanos = System.nanoTime() - start
+    val frameOutputShape = frameOutput.shape
+    val reverseOutputShape = revOutput?.shape
+    val digitsOutputShape = digitsOutput?.shape
+    val hasReverseInput = revInput != null
+    val hasDigitsInput = digitsInput != null
     val finiteCount = frameOutput.data.size + (revOutput?.data?.size ?: 0) + (digitsOutput?.data?.size ?: 0)
-    val report = JSONObject()
-      .put("runtime", config.runtime)
-      .put("pipelineId", config.pipelineId)
-      .put("semanticsVersion", config.semanticsVersion)
-      .put("decoderVersion", SuppliedYoloDecoder.SEMANTICS_VERSION)
-      .put("preprocessVersion", config.preprocessVersion)
-      .put("modelManifestSha256", manifestSha256)
-      .put("frameModelSha256", config.frame.sha256)
-      .put("reverseEnabled", BuildConfig.OCR_REVERSE_ENABLED)
-      .put("reverseModelSha256", config.reverse.sha256)
-      .put("digitsModelSha256", config.digits.sha256)
-      .put("inputShape", JSONArray(frameShape))
-      .put("outputShape", JSONArray(frameOutput.shape))
-      .put("reverseInputShape", if (revInput == null) JSONObject.NULL else JSONArray(detectShape))
-      .put("reverseOutputShape", revOutput?.let { JSONArray(it.shape) } ?: JSONObject.NULL)
-      .put("digitsInputShape", if (digitsInput == null) JSONObject.NULL else JSONArray(detectShape))
-      .put("digitsOutputShape", digitsOutput?.let { JSONArray(it.shape) } ?: JSONObject.NULL)
-      .put("finiteOutputs", finiteCount)
-      .put("invokeMs", (System.nanoTime() - start) / 1_000_000.0)
-      .put("inputSource", if (saveParity) "parity-image" else "full-image")
-      .put("source", "gallery")
-      .put("authenticity", "unverified")
-      .put("imagePixelSha256", hash(rgb))
-      .put("cropPixelSha256", cropRgb?.let { hash(it) } ?: JSONObject.NULL)
-      .put("cropUsedPixelSha256", cropUsedRgb?.let { hash(it) } ?: JSONObject.NULL)
-      .put("status", reading.status)
-      .put("rawDigits", reading.rawDigits ?: JSONObject.NULL)
-      .put("reason", reading.reason ?: JSONObject.NULL)
-      .put("confidence", reading.confidence)
-      .put("rawDiagnostic", reading.rawDiagnostic)
-      .put("isReversed", revDecision.isReversed)
-      .put("reverseTriggerReason", revDecision.reason)
-      .put("rowBox", cropPlan.rowBox?.let { JSONArray(it) } ?: JSONObject.NULL)
-      .put("orderedPolygon", orderedPolygonJson)
-      .put("cropSize", cropSizeJson)
-      .put("imageSize", JSONArray(intArrayOf(width, height)))
-      .put("frameCount", frameDetections.size)
-      .put("frameDetections", frameDetectionsJson)
-      .put("reverseDetections", revDetectionsJson)
-      .put("revClasses", JSONArray(revDecision.classes))
-      .put("digitDetections", digitDetectionsJson)
-      .put("digitClassesLeftToRight", JSONArray(reading.digitClassesLeftToRight))
-      .put("detections", digitDetectionsJson)
-
-    if (saveParity) {
-      val directory = File(context.filesDir, "ocr-parity/latest").apply { check(exists() || mkdirs()) }
-      saveTensor(directory, "frame_input", frameInput)
-      saveTensor(directory, "frame_output", frameOutput.data)
-      if (revInput != null && revOutput != null && digitsInput != null && digitsOutput != null) {
-        saveTensor(directory, "reverse_input", revInput)
-        saveTensor(directory, "reverse_output", revOutput.data)
-        saveTensor(directory, "digits_input", digitsInput)
-        saveTensor(directory, "digits_output", digitsOutput.data)
-      } else {
-        for (stale in listOf("reverse_input.f32", "reverse_output.f32", "digits_input.f32", "digits_output.f32")) {
-          File(directory, stale).delete()
+    val parityWriter: ((JSONObject) -> Unit)? = if (saveParity) {
+      val savedReverseInput = revInput
+      val savedReverseOutput = revOutput
+      val savedDigitsInput = digitsInput
+      val savedDigitsOutput = digitsOutput
+      val write: (JSONObject) -> Unit = { report ->
+        val directory = File(context.filesDir, "ocr-parity/latest").apply { check(exists() || mkdirs()) }
+        saveTensor(directory, "frame_input", frameInput)
+        saveTensor(directory, "frame_output", frameOutput.data)
+        if (savedReverseInput != null && savedReverseOutput != null && savedDigitsInput != null && savedDigitsOutput != null) {
+          saveTensor(directory, "reverse_input", savedReverseInput)
+          saveTensor(directory, "reverse_output", savedReverseOutput.data)
+          saveTensor(directory, "digits_input", savedDigitsInput)
+          saveTensor(directory, "digits_output", savedDigitsOutput.data)
+        } else {
+          for (stale in listOf("reverse_input.f32", "reverse_output.f32", "digits_input.f32", "digits_output.f32")) {
+            File(directory, stale).delete()
+          }
         }
+        report.put("runId", UUID.randomUUID().toString()).put("tensorEncoding", "float32-le")
+        File(directory, "metadata.json").writeText(report.toString(2))
+        report.put("parityFixture", "files/ocr-parity/latest")
       }
-      report.put("runId", UUID.randomUUID().toString()).put("tensorEncoding", "float32-le")
-      File(directory, "metadata.json").writeText(report.toString(2))
-      report.put("parityFixture", "files/ocr-parity/latest")
-    }
+      write
+    } else null
+    return RealtimeFrame(width, height, reading, cropPlan, frameDetections) {
+      val reportStarted = System.nanoTime()
+      val frameDetectionsJson = JSONArray()
+      frameDetections.forEach { d ->
+        val polyJson = JSONArray()
+        d.polygon.forEach { pt -> polyJson.put(JSONArray(pt)) }
+        frameDetectionsJson.put(
+          JSONObject()
+            .put("anchor", d.anchor)
+            .put("classId", d.classId)
+            .put("class", d.label)
+            .put("score", d.score.toDouble())
+            .put("netObb", JSONArray(d.netObb))
+            .put("polygon", polyJson)
+        )
+      }
 
-    return report.toString()
+      val revDetectionsJson = JSONArray()
+      revDetections.forEach { d ->
+        revDetectionsJson.put(
+          JSONObject()
+            .put("anchor", d.anchor)
+            .put("classId", d.classId)
+            .put("class", d.label)
+            .put("score", d.score.toDouble())
+            .put("box", JSONArray(d.box))
+            .put("cx", d.cx.toDouble())
+            .put("cy", d.cy.toDouble())
+        )
+      }
+
+      val digitDetectionsJson = JSONArray()
+      reading.sortedDetections.forEach { d ->
+        digitDetectionsJson.put(
+          JSONObject()
+            .put("anchor", d.anchor)
+            .put("classId", d.classId)
+            .put("class", d.label)
+            .put("digit", d.digit ?: JSONObject.NULL)
+            .put("score", d.score.toDouble())
+            .put("box", JSONArray(d.box))
+            .put("cx", d.cx.toDouble())
+            .put("cy", d.cy.toDouble())
+        )
+      }
+
+      val orderedPolygonJson = cropPlan.orderedPolygon?.let { poly ->
+        JSONArray().also { arr -> poly.forEach { pt -> arr.put(JSONArray(pt)) } }
+      } ?: JSONObject.NULL
+
+      val cropSizeJson = if (cropPlan.cropWidth > 0 && cropPlan.cropHeight > 0) {
+        JSONArray(intArrayOf(cropPlan.cropWidth, cropPlan.cropHeight))
+      } else {
+        JSONObject.NULL
+      }
+
+      val report = JSONObject()
+        .put("runtime", config.runtime)
+        .put("pipelineId", config.pipelineId)
+        .put("semanticsVersion", config.semanticsVersion)
+        .put("decoderVersion", SuppliedYoloDecoder.SEMANTICS_VERSION)
+        .put("preprocessVersion", config.preprocessVersion)
+        .put("modelManifestSha256", manifestSha256)
+        .put("frameModelSha256", config.frame.sha256)
+        .put("reverseEnabled", BuildConfig.OCR_REVERSE_ENABLED)
+        .put("reverseModelSha256", config.reverse.sha256)
+        .put("digitsModelSha256", config.digits.sha256)
+        .put("inputShape", JSONArray(frameShape))
+        .put("outputShape", JSONArray(frameOutputShape))
+        .put("reverseInputShape", if (!hasReverseInput) JSONObject.NULL else JSONArray(detectShape))
+        .put("reverseOutputShape", reverseOutputShape?.let { JSONArray(it) } ?: JSONObject.NULL)
+        .put("digitsInputShape", if (!hasDigitsInput) JSONObject.NULL else JSONArray(detectShape))
+        .put("digitsOutputShape", digitsOutputShape?.let { JSONArray(it) } ?: JSONObject.NULL)
+        .put("finiteOutputs", finiteCount)
+        .put("invokeMs", (pipelineNanos + System.nanoTime() - reportStarted) / 1_000_000.0)
+        .put("inputSource", if (saveParity) "parity-image" else "full-image")
+        .put("source", "gallery")
+        .put("authenticity", "unverified")
+        .put("imagePixelSha256", hash(rgb))
+        .put("cropPixelSha256", cropRgb?.let { hash(it) } ?: JSONObject.NULL)
+        .put("cropUsedPixelSha256", cropUsedRgb?.let { hash(it) } ?: JSONObject.NULL)
+        .put("status", reading.status)
+        .put("rawDigits", reading.rawDigits ?: JSONObject.NULL)
+        .put("reason", reading.reason ?: JSONObject.NULL)
+        .put("confidence", reading.confidence)
+        .put("rawDiagnostic", reading.rawDiagnostic)
+        .put("isReversed", revDecision.isReversed)
+        .put("reverseTriggerReason", revDecision.reason)
+        .put("rowBox", cropPlan.rowBox?.let { JSONArray(it) } ?: JSONObject.NULL)
+        .put("orderedPolygon", orderedPolygonJson)
+        .put("cropSize", cropSizeJson)
+        .put("imageSize", JSONArray(intArrayOf(width, height)))
+        .put("frameCount", frameDetections.size)
+        .put("frameDetections", frameDetectionsJson)
+        .put("reverseDetections", revDetectionsJson)
+        .put("revClasses", JSONArray(revDecision.classes))
+        .put("digitDetections", digitDetectionsJson)
+        .put("digitClassesLeftToRight", JSONArray(reading.digitClassesLeftToRight))
+        .put("detections", digitDetectionsJson)
+
+      parityWriter?.invoke(report)
+      report
+    }
   }
 
   private fun saveTensor(directory: File, name: String, values: FloatArray) {

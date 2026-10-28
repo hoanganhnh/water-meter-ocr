@@ -679,4 +679,133 @@ object SuppliedYoloDecoder {
       sortedDetections = enriched,
     )
   }
+
+  /**
+   * When a 6-digit water meter has one roller halfway between two digits (e.g. 4-5), its activation
+   * in the 30-class model (`d`, `d+10`, `d+20`) can split across sub-classes so each individual
+   * head falls just below `confThres = 0.25f`, leaving 5 high-confidence digits and one empty slot.
+   *
+   * If exactly 5 digits are detected and their horizontal pitch reveals an empty 6th slot (internal
+   * gap or left/right edge slot), scan the raw output tensor within that slot and combine same-digit
+   * sub-class probabilities (`d`, `d+10`, `d+20`) via noisy-OR to recover the transitioning roller.
+   */
+  fun recoverMissingRollerDigit(
+    rawOutput: FloatArray,
+    anchors: Int,
+    meta: LetterboxMeta,
+    names: Map<Int, String>,
+    primaryDetections: List<BoxDetection>,
+    cropWidth: Int,
+    cropHeight: Int,
+  ): List<BoxDetection> {
+    if (primaryDetections.size != 5 || cropWidth <= 0 || cropHeight <= 0) return primaryDetections
+    val nc = names.size
+    if (nc != DIGITS_CLASSES || rawOutput.size != (4 + nc) * anchors) return primaryDetections
+
+    val sorted = primaryDetections.sortedWith(
+      compareBy<BoxDetection> { it.box[0] }.thenBy { it.cx }.thenBy { it.anchor }
+    )
+    val steps = FloatArray(4) { i -> sorted[i + 1].cx - sorted[i].cx }
+    val sortedSteps = steps.sortedArray()
+    val medianStep = (sortedSteps[1] + sortedSteps[2]) / 2f
+    if (!medianStep.isFinite() || medianStep <= 4f) return primaryDetections
+
+    val widths = sorted.map { it.box[2] - it.box[0] }.sorted()
+    val heights = sorted.map { it.box[3] - it.box[1] }.sorted()
+    val cys = sorted.map { it.cy }.sorted()
+    val medianWidth = widths[2]
+    val medianHeight = heights[2]
+    val medianCy = cys[2]
+    if (medianWidth <= 2f || medianHeight <= 4f) return primaryDetections
+    // Verify the 5 existing digits have consistent spacing (at most one missing-digit gap).
+    var internalGapIndex = -1
+    for (i in steps.indices) {
+      val s = steps[i]
+      if (s < medianWidth * 0.45f) return primaryDetections
+      if (s > medianStep * 1.60f) {
+        if (internalGapIndex != -1 || s > medianStep * 2.55f) return primaryDetections
+        internalGapIndex = i
+      }
+    }
+
+    val expectedSlots = ArrayList<Float>(2)
+    if (internalGapIndex >= 0) {
+      expectedSlots.add((sorted[internalGapIndex].cx + sorted[internalGapIndex + 1].cx) / 2f)
+    } else {
+      val rightMargin = cropWidth.toFloat() - sorted.last().box[2]
+      val leftMargin = sorted.first().box[0]
+      if (rightMargin >= medianStep * 0.82f) {
+        val rightCx = sorted.last().cx + medianStep
+        if (rightCx <= cropWidth - medianWidth * 0.20f) expectedSlots.add(rightCx)
+      }
+      if (leftMargin >= medianStep * 0.82f) {
+        val leftCx = sorted.first().cx - medianStep
+        if (leftCx >= medianWidth * 0.20f) expectedSlots.add(leftCx)
+      }
+    }
+    if (expectedSlots.isEmpty()) return primaryDetections
+
+    val gain = meta.gain
+    val leftPad = meta.left.toDouble()
+    val topPad = meta.top.toDouble()
+    val widthD = meta.inputWidth.toDouble()
+    val heightD = meta.inputHeight.toDouble()
+
+    var bestCandidate: BoxDetection? = null
+    var bestCombinedScore = 0f
+
+    for (slotCx in expectedSlots) {
+      for (anchor in 0 until anchors) {
+        val wNet = rawOutput[2 * anchors + anchor]
+        val hNet = rawOutput[3 * anchors + anchor]
+        if (wNet <= 0f || hNet <= 0f) continue
+        val cxNet = rawOutput[anchor]
+        val cyNet = rawOutput[anchors + anchor]
+        val x1 = (((cxNet - wNet / 2f).toDouble() - leftPad) / gain).coerceIn(0.0, widthD).toFloat()
+        val y1 = (((cyNet - hNet / 2f).toDouble() - topPad) / gain).coerceIn(0.0, heightD).toFloat()
+        val x2 = (((cxNet + wNet / 2f).toDouble() - leftPad) / gain).coerceIn(0.0, widthD).toFloat()
+        val y2 = (((cyNet + hNet / 2f).toDouble() - topPad) / gain).coerceIn(0.0, heightD).toFloat()
+        val bw = x2 - x1
+        val bh = y2 - y1
+        if (bw < medianWidth * 0.45f || bw > medianWidth * 1.85f) continue
+        if (bh < medianHeight * 0.50f || bh > medianHeight * 1.65f) continue
+        val cx = (x1 + x2) / 2f
+        val cy = (y1 + y2) / 2f
+        if (abs(cx - slotCx) > medianStep * 0.42f) continue
+        if (abs(cy - medianCy) > medianHeight * 0.50f) continue
+        val candBox = floatArrayOf(x1, y1, x2, y2)
+        if (sorted.any { axisIou(candBox, it.box) >= 0.22f }) continue
+
+        for (digit in 0 until 10) {
+          val s0 = rawOutput[(4 + digit) * anchors + anchor]
+          val s1 = rawOutput[(4 + digit + 10) * anchors + anchor]
+          val s2 = rawOutput[(4 + digit + 20) * anchors + anchor]
+          val maxSub = max(s0, max(s1, s2))
+          if (maxSub < 0.12f) continue
+          val combined = 1f - (1f - s0.coerceIn(0f, 1f)) * (1f - s1.coerceIn(0f, 1f)) * (1f - s2.coerceIn(0f, 1f))
+          if (combined < 0.22f) continue
+          val bestCls = when {
+            s1 >= s0 && s1 >= s2 -> digit + 10
+            s2 >= s0 && s2 >= s1 -> digit + 20
+            else -> digit
+          }
+          val label = names[bestCls] ?: continue
+          if (combined > bestCombinedScore) {
+            bestCombinedScore = combined
+            bestCandidate = BoxDetection(
+              anchor = anchor,
+              classId = bestCls,
+              label = label,
+              score = max(maxSub, combined.coerceAtMost(0.75f)),
+              box = candBox,
+              cx = cx,
+              cy = cy,
+            )
+          }
+        }
+      }
+    }
+
+    return if (bestCandidate != null) primaryDetections + bestCandidate else primaryDetections
+  }
 }

@@ -17,8 +17,8 @@
   "models": {
     "frame": {
       "file": "frame.onnx",
-      "sha256": "bbe40d040cfa7a467fbe3051b2d62c29a5d83336da3099e450436c1c0f59cacc",
-      "sizeBytes": 12463574,
+      "sha256": "4d66b0fbee9d785b4449f389f37fc94f40e3027a822d3e6293ee5d974e860bf3",
+      "sizeBytes": 12463575,
       "sourceFile": "models/best_latest.pt",
       "sourceSha256": "2f1d73f4ca887b3a59cfe263163ac09f538100b84cb9837c91edd7dc3c105675",
       "sourceSizeBytes": 6427020,
@@ -90,8 +90,8 @@
       },
       "exportParity": {
         "samples": 4,
-        "maxAbsDelta": 0.009063720703125,
-        "meanAbsDelta": 4.45893912228712e-05,
+        "maxAbsDelta": 0.008056640625,
+        "meanAbsDelta": 3.732513880549959e-05,
         "maxRelDelta": 0.00037450806121341884,
         "atol": 0.0001,
         "rtol": 0.0001,
@@ -101,8 +101,8 @@
     },
     "digits": {
       "file": "digits.onnx",
-      "sha256": "f29cfaeccbbe6ec46f53cc694358dec039604550b73419ab8103775e5ed06fe2",
-      "sizeBytes": 12135238,
+      "sha256": "31cd6b7d917e0324057e04cb71414ec023ab04f1b7630c0fe7c14d159580fa4d",
+      "sizeBytes": 12135239,
       "sourceFile": "models/best_0608.pt",
       "sourceSha256": "c475d9e8753f20daae4c405e99b03dfff4868c02926965fce6060743a692a9bd",
       "sourceSizeBytes": 6225635,
@@ -203,9 +203,9 @@
       },
       "exportParity": {
         "samples": 4,
-        "maxAbsDelta": 0.0013580322265625,
-        "meanAbsDelta": 2.3115128442441346e-06,
-        "maxRelDelta": 0.00013726550969295204,
+        "maxAbsDelta": 0.0008087158203125,
+        "meanAbsDelta": 1.6800655942006415e-06,
+        "maxRelDelta": 0.0001372659025946632,
         "atol": 0.0001,
         "rtol": 0.0001,
         "passed": true
@@ -248,8 +248,8 @@
     },
     "reverse": {
       "file": "reverse.onnx",
-      "sha256": "e5b8c11e877b15f94618dbf014747478a091483a1731fd4a47b3fa839957984b",
-      "sizeBytes": 12116287,
+      "sha256": "96f4bd41f7cf0b1b7885a0dd2d15a3f39989505cfdd53b26830cac1f0d97e7c2",
+      "sizeBytes": 12116288,
       "sourceFile": "models/best_1608.pt",
       "sourceSha256": "17413d10235061c85a6da177b414b38eaaf73b1ab70ee74317cdb018a267fe25",
       "sourceSizeBytes": 6216035,
@@ -327,8 +327,8 @@
       "exportParity": {
         "samples": 4,
         "maxAbsDelta": 0.000244140625,
-        "meanAbsDelta": 3.150003863083839e-06,
-        "maxRelDelta": 0.00013652915367856622,
+        "meanAbsDelta": 3.1363302355202904e-06,
+        "maxRelDelta": 0.0001365287316730246,
         "atol": 0.0001,
         "rtol": 0.0001,
         "passed": true

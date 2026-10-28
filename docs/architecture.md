@@ -1,102 +1,61 @@
-﻿# Tích hợp YOLO vào native Android
+# Luồng hoạt động & Kiến trúc OCR Đồng hồ nước
 
-Pipeline `supplied-yolo-3stage-v1` dùng ba checkpoint được cung cấp để tìm khung số, xác định hướng và đọc chữ số. React Native phụ trách chụp/chọn ảnh và hiển thị; Kotlin xử lý ảnh và suy luận trên thiết bị. Android đã có triển khai; iOS hiện chỉ có scaffold.
+Ứng dụng đọc chỉ số đồng hồ nước hoạt động **100% offline ngay trên điện thoại** (không cần mạng Internet). Hệ thống AI đọc số theo 3 bước tự nhiên giống mắt người: **Tìm khung mặt số → Cắt phẳng ngay ngắn → Đọc từng chữ số từ trái sang phải**.
 
-## Nhận ảnh từ camera hoặc thư viện
+---
 
-Luồng realtime bổ sung: `MeterScreen.startRealtime()` → TurboModule mở `RealtimeMeterActivity` nội bộ → CameraX Preview/ImageAnalysis → RGBA Bitmap xoay theo `rotationDegrees` → `SuppliedYoloEngine.run` → `ReadingStability` → giữ frame ổn định → người dùng xác nhận → trả URI JPEG và JSON về React Native. Chụp ảnh và thư viện giữ đường xử lý riêng bên dưới.
+## 1. Luồng đọc từ Ảnh chụp / Thư viện
 
-Activity sở hữu một executor/engine, không dùng session đồng thời với module ảnh tĩnh; module khóa các yêu cầu khác trong lúc scanner mở. Preview dùng FIT_CENTER; overlay live dùng `ImageProxyTransformFactory`/`CoordinateTransform`, overlay ảnh giữ dùng đúng tỷ lệ ảnh. Native không truyền frame hoặc tensor qua bridge. `STRATEGY_KEEP_ONLY_LATEST`, throttle 400 ms và giải phóng `ImageProxy` trong `finally` sau phân tích giữ hàng đợi hữu hạn, tránh xếp thêm tác vụ phân tích ảnh cũ sau lượt đang bận. Mỗi kết quả gắn generation; pause/reset/đóng hủy kết quả cũ. Chỉ ảnh xác nhận được lưu vào cache, trả `source=realtime`; hủy trả `cancelled=true`.
+Dành cho trường hợp người dùng chụp một bức ảnh hoặc chọn ảnh có sẵn trong máy:
 
-`ReadingStability` kiểm tra chuỗi, hình học vùng chuẩn hóa, IoU với vùng neo, tuổi và đa số trong lịch sử tối đa 5 mẫu; kết quả ổn định được giữ cùng chính frame tạo ra nó để người dùng đối chiếu. Trạng thái quét không phải xác nhận độ chính xác hay kết quả nghiệp vụ đã được gửi đi. CameraX mới không thay checkpoint/manifest/decoder.
+```mermaid
+flowchart TD
+    A["1. Người dùng chụp ảnh hoặc chọn ảnh từ thư viện"] --> B["2. Kiểm tra ảnh rõ/hợp lệ & tự xoay đúng chiều"]
+    B --> C{"3. AI tìm khung dãy số"}
+    C -->|"Không thấy / Có nhiều đồng hồ"| ERR["Báo người dùng chụp lại gần và rõ 1 đồng hồ"]
+    C -->|"Thấy đúng 1 khung số"| D["4. Cắt riêng vùng số & nắn thẳng ngay ngắn"]
+    D --> E["5. AI đọc từng chữ số từ trái sang phải (5 - 6 số)"]
+    E --> F["6. Hiển thị chỉ số & khoanh vùng xanh trên ảnh"]
+```
 
-`MeterScreen` dùng `react-native-image-crop-picker`: `openPicker` nhận ảnh thư viện; `openCamera` mở camera hệ thống bằng Android `ACTION_IMAGE_CAPTURE` và FileProvider. Thư viện yêu cầu quyền camera lúc chạy; manifest khai báo `CAMERA`, phần cứng camera/autofocus là tùy chọn để thiết bị chỉ dùng thư viện vẫn cài được app.
+---
 
-Sau xác nhận, ảnh camera được thu nhỏ giữ tỷ lệ với cạnh tối đa 2.560 px, JPEG quality 0,95 và giữ EXIF hướng. Cả hai nguồn cùng đi qua `validateImage` → `runImageDiagnostic` → preview/overlay. Native nhận URI, không thêm model hoặc đường suy luận riêng cho camera. Đây là chụp từng ảnh; điều khiển preview và xác nhận thuộc ứng dụng camera của thiết bị.
+## 2. Luồng quét Camera Realtime (Tự động bắt số)
 
-Một khóa nhận ảnh dùng chung chặn gọi camera/picker trùng nhau và chặn nhận ảnh mới khi OCR đang chạy. Hủy không tạo lỗi; từ chối quyền hoặc thiếu camera có thông báo và giữ đường thư viện. Ảnh trả về chỉ được xóa sau khi native hoàn tất; kết quả về sau unmount bị bỏ và dọn ảnh. Camera gốc/tệp dở trước khi Promise trả về do thư viện quản lý, không nằm trong quyền sở hữu URI của màn hình.
+Dành cho trường hợp người dùng mở camera đưa vào đồng hồ để máy tự động nhận diện và chốt ảnh:
 
-## Công nghệ và ranh giới
+```mermaid
+flowchart TD
+    A["1. Mở Camera đưa vào đồng hồ (Chạy ngầm mượt, không giật màn hình)"] --> B{"2. AI tìm khung dãy số"}
+    B -->|"Chưa thấy / Để máy quá xa"| GUIDE["Nhắc: Đưa điện thoại lại gần dãy số hơn"]
+    GUIDE --> A
 
-| Thành phần     | Công nghệ                                                       | Vai trò / nơi cấu hình                                                                                                                                                         |
-| -------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Giao diện      | React Native 0.87, React 19.2, TypeScript, Hermes               | Picker dùng `react-native-image-crop-picker`; phiên bản và Codegen tại [package.json](../app/package.json), runtime tại [gradle.properties](../app/android/gradle.properties). |
-| Bridge         | TurboModule + React Native Codegen                              | [NativeMeterOcr.ts](../app/src/specs/NativeMeterOcr.ts) là hợp đồng JS/native; Codegen tạo lớp spec để Kotlin kế thừa.                                                         |
-| Native         | Kotlin 2.2, Android Bitmap/Matrix, AndroidX ExifInterface 1.4.2 | Đọc URI, quản lý tài nguyên, chuẩn hóa EXIF; cấu hình tại [Android build](../app/android/build.gradle) và [app build](../app/android/app/build.gradle).                        |
-| Suy luận       | ONNX Runtime Android 1.20, CPU                                  | Chạy model FP32 bằng `OrtSession`, không cần dịch vụ suy luận bên ngoài.                                                                                                       |
-| Xử lý ảnh      | OpenCV Android 4.12                                             | Resize, biến đổi phối cảnh, lấy vùng số; đóng gói runtime native qua Gradle.                                                                                                   |
-| Chuẩn bị model | Python, Ultralytics/PyTorch, ONNX, ONNX Runtime, OpenCV         | Export và tạo kết quả tham chiếu; môi trường/lệnh tái lập tại [tools/ocr](../tools/ocr/README.md).                                                                             |
+    B -->|"Đã thấy rõ khung số"| C["3. AI đọc dãy số (Tự nhận biết cả số đang quay dở giữa 2 mức)"]
+    C --> D{"4. Kiểm tra chắc chắn trước khi chốt"}
+    D -->|"Tay còn rung / Chưa đủ 6 số / Mới khớp 1 lần"| WAIT["Hiện trạng thái: Đang xác nhận... giữ yên máy"]
+    WAIT --> A
 
-Chọn ONNX để tái sử dụng ONNX Runtime Android và Kotlin hiện có. Tách export khỏi app giúp giữ nguyên checkpoint `.pt`, kiểm tra model trước khi đóng APK và chạy offline. TFLite hoặc backend suy luận cần luồng chuyển đổi/kiểm chứng khác, không thuộc kiến trúc này.
+    D -->|"Tay giữ yên & đọc khớp >= 2 lần liên tiếp"| E["5. Tự động giữ lại bức ảnh nét nhất kèm chỉ số"]
+    E --> F{"6. Người dùng kiểm tra lại"}
+    F -->|"Đúng chỉ số"| OK["Bấm 'Dùng chỉ số này' -> Lưu kết quả"]
+    F -->|"Muốn quét lại"| RETRY["Bấm 'Quét lại' -> Tiếp tục quét ngay"]
+```
 
-## Từ checkpoint tới APK
+### Vì sao luồng Realtime hoạt động ổn định?
+- **Không chốt vội khi tay còn di chuyển:** Máy chỉ tự dừng ảnh khi bạn giữ yên điện thoại và AI đọc ra **cùng một dãy số ít nhất 2 lần liên tiếp**.
+- **Không đọc thiếu chữ số (5 số thay vì 6 số):** Máy kiểm tra khoảng cách đều nhau giữa các chữ số; nếu đã nhìn thấy đồng hồ 6 số thì sẽ bỏ qua các khung hình bị lóa/mất 1 số.
+- **Xử lý được đồng hồ đang nhảy số (cắt nửa giữa 4 và 5):** Khi vòng quay cơ học nằm lưng chừng giữa 2 số, AI tự gộp tín hiệu ở vị trí đó để đọc ra chữ số hợp lý nhất thay vì bỏ trống.
+- **Màn hình luôn mượt khi lia máy:** Việc phân tích AI chạy hoàn toàn ở luồng nền và chỉ lấy khung hình mới nhất, không làm đơ hay chớp đen màn hình camera.
 
-Nguồn cấu hình model, nhãn, tensor shape, hash và chính sách đọc là [supplied-yolo-manifest.json](../app/android/app/src/main/assets/ocr/supplied-yolo-manifest.json).
+---
 
-| Thứ tự chạy | Nguồn → asset ONNX | Input → raw output | Ý nghĩa |
-|---|---|---|---|
-| 1. Tìm khung | `models/best_latest.pt` → `frame.onnx` | `[1,3,640,640]` → `[1,6,8400]` | YOLOv8n-OBB, lớp `khung`; hộp có tâm, kích thước và góc xoay. |
-| 2. Check ngược | `models/best_1608.pt` → `reverse.onnx` | `[1,3,320,320]` → `[1,10,2100]` | Detector nhãn chữ số ngược, quyết định có xoay crop 180° hay không. |
-| 3. Đọc số | `models/best_0608.pt` → `digits.onnx` | `[1,3,320,320]` → `[1,34,2100]` | Detector 30 lớp; ánh xạ nhãn thành chữ số và ghép chuỗi. |
+## 3. Bản đồ mã nguồn (Dành cho kỹ thuật)
 
-[Exporter](../tools/ocr/export_supplied_yolo.py) xuất ONNX opset 17, kích thước cố định, FP32, `dynamic=False`, `simplify=False`, `nms=False`. Graph trả raw head nên NMS/giải mã nằm trong Kotlin; output chưa phải danh sách box cuối cùng. Model và manifest được stage vào `app/android/app/src/main/assets/ocr/` sau kiểm chứng.
-
-[Gradle](../app/android/app/build.gradle) kiểm tra size/hash và chặn asset cũ hoặc tensor debug trước build. Native kiểm tra cấu hình, chép ONNX từ assets vào cache nếu cần, xác minh hash rồi mở session. Cache là bản sao có thể tái tạo. Không sửa `.pt` hoặc thay riêng một ONNX mà bỏ qua manifest và parity.
-
-## Luồng xử lý một ảnh
-
-Luồng chính: **chọn ảnh đầy đủ → kiểm tra URI/EXIF → tìm OBB → crop chỉnh thẳng → check ngược → đọc chữ số → JSON → overlay/kết quả**.
-
-1. **Chọn và kiểm tra ảnh.** [MeterScreen](../app/src/screens/MeterScreen.tsx) dùng picker với `cropping: false`, gọi `validateImage` rồi tự đọc ảnh. [MeterOcrModule](../app/android/app/src/main/java/com/watermeterocr/ocr/MeterOcrModule.kt) hỗ trợ đường dẫn/file URI và content URI đọc được cục bộ; copy có giới hạn vào tệp tạm, kiểm tra tối đa 25 MiB, 12 MP, mỗi chiều 16.384 px. Bitmap được xoay/lật theo EXIF trước suy luận. Ảnh không truy cập được offline hoặc không giải mã được là lỗi đầu vào.
-2. **Chuẩn hóa tensor.** [Engine](../app/android/app/src/main/java/com/watermeterocr/ocr/SuppliedYoloEngine.kt) lấy RGB, resize giữ tỉ lệ và letterbox với padding 114; đóng tensor FP32 NCHW, chia 255. Mỗi stage dùng kích thước riêng trong manifest. Khi port cần giữ đúng kênh màu, resize, làm tròn và padding.
-3. **Tìm và nắn khung.** [Decoder](../app/android/app/src/main/java/com/watermeterocr/ocr/SuppliedYoloDecoder.kt) giải mã OBB và ProbIoU NMS. Không có khung hoặc có nhiều khung trả `uncertain`; chỉ một khung mới đi tiếp. Các đỉnh được ánh xạ về ảnh sau EXIF, sắp cạnh dài nằm ngang và giữ chiều để không lật gương. OpenCV `warpPerspective` dùng `INTER_LINEAR`, `BORDER_REPLICATE`, không thêm margin; hình học không dùng được bị từ chối.
-4. **Xác định hướng.** `reverse.onnx` chạy trên crop đã nắn. Nhãn bất đối xứng thuộc `2n,3n,4n,5n,7n` hoặc ít nhất hai detection kích hoạt xoay 180°. Một `1n` đơn lẻ không kích hoạt vì dễ xuất hiện trên số 1 xuôi. Stage chữ số nhận crop sau quyết định này; không đảo chuỗi ở cuối.
-5. **Đọc và ghép số.** `digits.onnx` dùng class-agnostic NMS để loại box chồng giữa các lớp. Detection được sắp trái sang phải; bảng `classToDigit` ánh xạ lớp 0–29, hiện tương đương `int(label) % 10` (lớp 13 → `3`). Profile nhận 5 hoặc 6 chữ số, giữ kết quả dạng chuỗi, không tự thêm dấu thập phân. Mapping là hợp đồng riêng của bộ model này, không phải quy tắc chung của YOLO.
-
-Ngưỡng confidence/IoU, giới hạn hình học và quy tắc nhãn được sở hữu bởi manifest và `SuppliedYoloDecoder.validateConfig`; tài liệu không thay thế cấu hình đó.
-
-## Bridge và vòng đời native
-
-[NativeMeterOcr.ts](../app/src/specs/NativeMeterOcr.ts) định nghĩa các lời gọi bất đồng bộ trả Promise chứa JSON string:
-
-- `validateImage`: kiểm tra ảnh trước khi nhận vào luồng UI.
-- `startRealtime`: mở scanner native, trả ảnh minh chứng/JSON khi xác nhận hoặc `cancelled=true` khi đóng.
-- `releaseRealtimeImage`: chỉ xóa JPEG `meter-realtime-*` trong cache riêng đã kiểm tra canonical path, không yêu cầu quyền lưu trữ Android cũ.
-- `runImageDiagnostic`: đường đọc ảnh thông thường; tên “diagnostic” vẫn trả kết quả nhận diện thật.
-- `runRuntimeSmoke`: kiểm tra ba session bằng input tổng hợp, không phải chỉ số đồng hồ.
-- `runImageParity`: đường Debug xuất tensor/metadata; Release từ chối bằng `E_PARITY_DISABLED`.
-
-Bitmap và tensor giữ ở native; bridge truyền URI và JSON để hạn chế sao chép dữ liệu ảnh giữa JS và Android.
-
-[MeterOcrPackage](../app/android/app/src/main/java/com/watermeterocr/ocr/MeterOcrPackage.kt) đăng ký module trong [MainApplication](../app/android/app/src/main/java/com/watermeterocr/MainApplication.kt). Khi đổi tên module hoặc hợp đồng, phải giữ đồng bộ spec TypeScript, cấu hình Codegen, lớp Kotlin và đăng ký package. [getNativeOcr](../app/src/ocr/native.ts) là điểm lấy module phía JS.
-
-`MeterOcrModule` sở hữu một serial executor và engine được nạp khi cần, tái sử dụng ba session giữa các lượt đọc. Một tác vụ hoạt động tại một thời điểm; yêu cầu trùng bị từ chối `E_BUSY`, không xếp hàng vô hạn. `invalidate()` ngăn việc mới, để công việc đang chạy kết thúc trước khi đóng session, rồi shutdown executor; Promise đang chờ nhận `E_MODULE_CLOSED`.
-
-Serial áp dụng ở cấp yêu cầu; số luồng tính toán nội bộ ONNX Runtime được cấu hình riêng trong `SuppliedYoloEngine`.
-
-Bitmap, tệp tạm, OpenCV `Mat`, tensor và kết quả ONNX có phạm vi giải phóng rõ ràng. Các quyết định này tránh giữ bộ nhớ ảnh lớn, dùng session đã đóng hoặc chặn JS/UI thread. [DiagnosticController](../app/src/ocr/controller.ts) dùng generation để bỏ kết quả cũ; `MeterScreen` giữ quyền sở hữu ảnh tới khi native hoàn tất mới dọn tệp picker.
-
-## Kết quả trả UI
-
-Hợp đồng được tạo bởi `SuppliedYoloEngine.run`, bọc thời gian bởi `MeterOcrModule.runInference`, và tiêu thụ tại [readingView](../app/src/ocr/result.ts).
-
-| Nhóm | Ý nghĩa cho bên tích hợp |
-|---|---|
-| `pipelineId`, `semanticsVersion` | Nhận diện pipeline và ngữ nghĩa decoder; không ghép kết quả của các bundle khác nhau. |
-| `status`, `rawDigits`, `reason` | `ok` mang chuỗi chữ số hợp lệ theo profile; `uncertain` mang `rawDigits=null` cùng lý do như `no_row`, `multiple_rows`, `no_characters`, `unexpected_length`. Lỗi URI/runtime dùng Promise rejection, không giả thành kết quả đọc. |
-| `rowBox`, `imageSize` | Box `[left,top,right,bottom]` theo pixel của ảnh sau EXIF, không theo tensor letterbox/crop. UI scale và bù khoảng trống của `resizeMode=contain` để vẽ đúng overlay. |
-| `isReversed`, `confidence`, timing | Hướng, điểm tổng hợp và thời gian; confidence không phải xác suất chuỗi chắc chắn đúng. `totalMs` bao gồm đọc ảnh và nạp engine khi cần; `invokeMs` là phần pipeline trong engine, gồm tiền/hậu xử lý. |
-
-Giữ `rawDigits` là string để bảo toàn ký tự `0` **đã nhận diện**. Điều này không khôi phục ký tự detector bỏ sót; nếu khung cắt thiếu một số nhưng độ dài còn hợp lệ, kết quả vẫn có thể là `ok`. Không tự pad số 0 để che lỗi model.
-
-## Kiểm chứng khi thay model hoặc port native
-
-Ba điều kiện cần đánh giá riêng:
-
-1. **Đúng artifact:** checkpoint, ONNX và manifest khớp hash; xem [exporter](../tools/ocr/export_supplied_yolo.py) và task kiểm tra assets trong Gradle.
-2. **Đúng pipeline:** [host reference](../tools/ocr/supplied_yolo_reference.py) đối chiếu PyTorch/ONNX; [Android gates](../app/android/app/src/androidTest/java/com/watermeterocr/ocr/PhaseThreeGatesTest.kt) đối chiếu ảnh sau EXIF, tensor, OBB, hướng và chuỗi. Đọc dung sai từng stage trong test: tensor sau crop có thể khác do số học tọa độ và nội suy. Test đạt trong dung sai không chứng minh tensor khớp tuyệt đối; nới dung sai không sửa nguyên nhân sai lệch.
-3. **Đúng chỉ số và trải nghiệm:** fixture có nhãn chuẩn, ảnh ngoài fixture, picker/overlay Release offline và điện thoại thật. `status=ok` chỉ nói qua điều kiện decoder, không thay thế đối chiếu chỉ số.
-
-Chẩn đoán theo ranh giới: so hash/pixel ảnh và `frame_input` trước; sau đó OBB/crop, input hai detector, nhãn/hướng/chuỗi; cuối cùng JSON và overlay. Cách này phân biệt lỗi export, preprocessing, model và bridge/UI mà không thay đồng thời nhiều thành phần.
-
-Lệnh export/host ở [tools/ocr/README.md](../tools/ocr/README.md); build/test Android ở [app/README.md](../app/README.md). Kết quả chạy, mẫu crop mất số 0 đầu và phần nghiệm thu còn chờ nằm trong [báo cáo kiểm chứng](../plans/261016-0741-supplied-yolo-mobile-integration/reports/test-261020-latest-emulator-verification.md), không phải cam kết độ chính xác của kiến trúc.
+| Thành phần | Vai trò | File sở hữu |
+|---|---|---|
+| **Màn hình chính** | Chọn ảnh, chụp ảnh, mở quét realtime và hiển thị kết quả | [`MeterScreen.tsx`](../app/src/screens/MeterScreen.tsx), [`result.ts`](../app/src/ocr/result.ts) |
+| **Cầu nối React Native ↔ Android** | Hợp đồng giao tiếp giữa giao diện JS và nhân xử lý Kotlin | [`NativeMeterOcr.ts`](../app/src/specs/NativeMeterOcr.ts), [`MeterOcrModule.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/MeterOcrModule.kt) |
+| **Màn hình Camera Realtime** | Điều khiển CameraX, luồng nền `worker`, giao diện giữ ảnh | [`RealtimeMeterActivity.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/RealtimeMeterActivity.kt), [`AnalysisCadence.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/AnalysisCadence.kt) |
+| **Bộ lọc chất lượng & độ ổn định** | Kiểm tra độ nét, bố cục đủ số và đối chiếu nhiều khung hình liên tiếp | [`ReadingQuality.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/ReadingQuality.kt), [`ReadingStability.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/ReadingStability.kt) |
+| **Nhân AI 3 bước (ONNX + OpenCV)** | Tìm khung (`frame.onnx`), kiểm tra ngược (`reverse.onnx`), đọc số (`digits.onnx`) | [`SuppliedYoloEngine.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/SuppliedYoloEngine.kt), [`SuppliedYoloDecoder.kt`](../app/android/app/src/main/java/com/watermeterocr/ocr/SuppliedYoloDecoder.kt) |
+| **Cấu hình Model & Công cụ xuất** | Thông số model ONNX và script chuyển đổi từ PyTorch `.pt` | [`supplied-yolo-manifest.json`](../app/android/app/src/main/assets/ocr/supplied-yolo-manifest.json), [`tools/ocr/README.md`](../tools/ocr/README.md) |

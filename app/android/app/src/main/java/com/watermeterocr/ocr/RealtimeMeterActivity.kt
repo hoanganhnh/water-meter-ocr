@@ -28,6 +28,8 @@ import org.json.JSONObject
 class RealtimeMeterActivity : ComponentActivity() {
   private val worker = Executors.newSingleThreadExecutor()
   private val stability = ReadingStability()
+  private val cadence = AnalysisCadence()
+  private val scanLock = Any()
   private var engine: SuppliedYoloEngine? = null // Access only on worker.
   private lateinit var camera: LifecycleCameraController
   private lateinit var preview: PreviewView
@@ -39,7 +41,11 @@ class RealtimeMeterActivity : ComponentActivity() {
   @Volatile private var active = false
   @Volatile private var generation = 0
   @Volatile private var frozen = false
-  private var nextAnalysisAt = 0L // Worker owned.
+  @Volatile private var destroyed = false
+  @Volatile private var cameraBound = false
+  private var captureOffsetNs: Long? = null // Worker owned; camera timebase need not equal elapsed realtime.
+  private var lastSubmittedCaptureNs = 0L
+  @Volatile private var scanStartedMs = 0L
   private var workerGeneration = -1
   private var frozenBitmap: Bitmap? = null // Main thread owned.
   private var frozenResult: JSONObject? = null
@@ -53,9 +59,23 @@ class RealtimeMeterActivity : ComponentActivity() {
       imageAnalysisBackpressureStrategy = ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
       imageAnalysisOutputImageFormat = ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888
       imageAnalysisTargetSize = CameraController.OutputSize(Size(1280, 960))
-      setImageAnalysisAnalyzer(worker, ::analyze)
     }
     preview.controller = camera
+    // Start preview immediately, but attach analysis only after preload: an old first image
+    // must not wait in the executor behind model initialization and establish a stale baseline.
+    // Run analyzer directly on worker so RGBA conversion stays off the UI thread and CameraX's
+    // STRATEGY_KEEP_ONLY_LATEST lease stays held until analyze() closes the ImageProxy.
+    worker.execute {
+      if (!destroyed) {
+        try { readyEngine() }
+        catch (error: Exception) { android.util.Log.w("RealtimeMeter", "Engine initialization failed", error) }
+        finally {
+          runOnUiThread {
+            if (!destroyed) camera.setImageAnalysisAnalyzer(worker, ::analyze)
+          }
+        }
+      }
+    }
     if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bindCamera()
     else requestPermissions(arrayOf(Manifest.permission.CAMERA), 40)
   }
@@ -94,8 +114,9 @@ class RealtimeMeterActivity : ComponentActivity() {
       FrameLayout.LayoutParams(-1, -1))
     root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
     status = TextView(this).apply {
-      text = "Giữ đồng hồ đúng chiều, dãy số nằm ngang. Đưa gần và giữ yên 2–3 giây. Chạm ảnh để lấy nét."
+      text = "Đưa gần toàn bộ dãy số, giữ đúng chiều và tránh lóa. Chạm ảnh để lấy nét."
       textSize = 17f; setTextColor(Color.WHITE); setPadding(8, 12, 8, 12)
+      minLines = 2; maxLines = 2
       accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
     root.addView(status)
@@ -119,7 +140,7 @@ class RealtimeMeterActivity : ComponentActivity() {
       setOnClickListener {
         if (::camera.isInitialized && camera.cameraInfo?.hasFlashUnit() == true) {
           torch = !torch; camera.enableTorch(torch)
-        } else status.text = "Thiết bị không có đèn pin khả dụng."
+        } else updateStatus("Thiết bị không có đèn pin khả dụng.")
       }
     }, LinearLayout.LayoutParams(0, -2, 1f))
     actions.addView(Button(this).apply { text = "Đóng"; setOnClickListener { finish() } },
@@ -128,10 +149,17 @@ class RealtimeMeterActivity : ComponentActivity() {
     setContentView(root)
   }
 
+  private fun updateStatus(message: String) {
+    if (status.text.toString() != message) status.text = message
+  }
+
   private fun bindCamera() {
-    try { camera.bindToLifecycle(this) }
-    catch (error: Exception) {
-      status.text = "Không mở được camera. Bạn có thể đóng để chụp hoặc chọn ảnh."
+    if (cameraBound) return
+    try {
+      camera.bindToLifecycle(this)
+      cameraBound = true
+    } catch (error: Exception) {
+      updateStatus("Không mở được camera. Bạn có thể đóng để chụp hoặc chọn ảnh.")
     }
   }
 
@@ -139,18 +167,17 @@ class RealtimeMeterActivity : ComponentActivity() {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     if (requestCode == 40) {
       if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) bindCamera()
-      else status.text = "Chưa có quyền camera. Cho phép trong Cài đặt → Ứng dụng → WaterMeterOCR → Quyền; hoặc đóng để chọn ảnh."
+      else updateStatus("Chưa có quyền camera. Cho phép trong Cài đặt → Ứng dụng → WaterMeterOCR → Quyền; hoặc đóng để chọn ảnh.")
     }
   }
 
   private fun resetScan() {
-    generation++
-    frozen = false
-    stability.reset()
+    synchronized(scanLock) { generation++; frozen = false; scanStartedMs = SystemClock.elapsedRealtime() }
+    // The worker clears its own evidence on generation change before cadence checks.
     frozenImage.setImageDrawable(null); frozenImage.visibility = View.GONE
     frozenBitmap?.recycle(); frozenBitmap = null; frozenResult = null
-    confirm.isEnabled = false; overlay.box = null; overlay.invalidate()
-    status.text = "Giữ đồng hồ đúng chiều, dãy số nằm ngang. Đưa gần và giữ yên 2–3 giây. Chạm ảnh để lấy nét."
+    confirm.isEnabled = false; overlay.box = null; overlay.frozenSize = null; overlay.invalidate()
+    updateStatus("Đưa gần toàn bộ dãy số, giữ đúng chiều và tránh lóa. Chạm ảnh để lấy nét.")
   }
 
   override fun onStart() { super.onStart(); active = true; resetScan() }
@@ -160,81 +187,151 @@ class RealtimeMeterActivity : ComponentActivity() {
     super.onStop()
   }
 
-  private fun analyze(image: ImageProxy) {
+  private fun readyEngine(): SuppliedYoloEngine {
+    engine?.let { return it }
+    val started = SystemClock.elapsedRealtime()
+    return SuppliedYoloEngine(applicationContext).also {
+      engine = it
+      if (com.watermeterocr.BuildConfig.DEBUG)
+        android.util.Log.d("RealtimeMeter", "engineReadyMs=${SystemClock.elapsedRealtime() - started}")
+    }
+  }
+
+  /** Admission runs on main so its generation cannot race with reset or executor shutdown. */
+  private fun admitFrame(image: ImageProxy) {
     val token = generation
+    val admittedAt = SystemClock.elapsedRealtime()
+    if (!active || destroyed || frozen) { image.close(); return }
+    try { worker.execute { analyze(image, token, admittedAt) } }
+    catch (_: java.util.concurrent.RejectedExecutionException) { image.close() }
+  }
+
+  // Also used by the labelled-frame instrumentation path already running on the worker.
+  private fun analyze(image: ImageProxy) = analyze(image, generation, SystemClock.elapsedRealtime())
+
+  private fun analyze(image: ImageProxy, token: Int, admittedAt: Long) {
     var bitmap: Bitmap? = null
+    var started = -1L
+    var reserved = false
     try {
+      if (!active || destroyed || frozen || token != generation) return
       val now = SystemClock.elapsedRealtime()
-      if (!active || frozen || now < nextAnalysisAt) return
-      nextAnalysisAt = now + 400
-      if (workerGeneration != token) { stability.reset(); workerGeneration = token }
-      val started = SystemClock.elapsedRealtime()
+      if (workerGeneration != token) {
+        stability.reset(); cadence.reset(); captureOffsetNs = null; lastSubmittedCaptureNs = 0L
+        workerGeneration = token
+      }
+      if (now - admittedAt > 3000) { stability.reset(); return }
+      if (!cadence.shouldAnalyze(now)) return
+      val capturedAtNs = image.imageInfo.timestamp
+      if (capturedAtNs <= 0 || capturedAtNs < lastSubmittedCaptureNs) { stability.reset(); return }
+      if (capturedAtNs == lastSubmittedCaptureNs) return
+      lastSubmittedCaptureNs = capturedAtNs
+      // Compare relative clock offsets, not absolute timestamps from potentially different timebases.
+      // The first delivered frame establishes the baseline; CameraX bounds its pending queue.
+      val offset = SystemClock.elapsedRealtimeNanos() - capturedAtNs
+      val baseline = minOf(captureOffsetNs ?: offset, offset)
+      captureOffsetNs = baseline
+      if (offset - baseline > 3_000_000_000L) { stability.reset(); return }
+      started = now
       val sourceTransform = ImageProxyTransformFactory().apply {
         isUsingRotationDegrees = true
       }.getOutputTransform(image)
       val raw = image.toBitmap()
+      bitmap = raw
       val rotated = if (image.imageInfo.rotationDegrees == 0) raw else Bitmap.createBitmap(
         raw, 0, 0, raw.width, raw.height,
         Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }, true)
       if (rotated !== raw) raw.recycle()
       bitmap = rotated
-      // Keep the analysis lease until finally: CameraX overwrites its waiting
-      // frame instead of queuing another analyzer call behind this inference.
-      val runtime = engine ?: SuppliedYoloEngine(applicationContext).also { engine = it }
-      val result = JSONObject(runtime.run(rotated, false, false))
-        .put("source", "realtime").put("totalMs", SystemClock.elapsedRealtime() - started)
-      if (!active || token != generation) return
-      val row = result.optJSONArray("rowBox")
-      val box = if (row != null && row.length() == 4) RectF(
-        row.getDouble(0).toFloat(), row.getDouble(1).toFloat(),
-        row.getDouble(2).toFloat(), row.getDouble(3).toFloat()) else null
-      val digits = if (result.optString("status") == "ok") result.optString("rawDigits") else null
-      val normalized = box?.let { floatArrayOf(it.left / rotated.width, it.top / rotated.height,
-        it.right / rotated.width, it.bottom / rotated.height) }
-      val stable = stability.observe(digits, normalized, SystemClock.elapsedRealtime())
+      val convertedAt = SystemClock.elapsedRealtime()
+      val evidence = readyEngine().runRealtime(rotated)
+      val inferredAt = SystemClock.elapsedRealtime()
+      if (!active || token != generation || destroyed) return
+      val row = evidence.cropPlan.rowBox
+      val box = row?.let { RectF(it[0].toFloat(), it[1].toFloat(), it[2].toFloat(), it[3].toFloat()) }
+      val observation = ReadingQuality.evaluate(evidence.reading, evidence.cropPlan,
+        evidence.frameDetections, evidence.width, evidence.height)
+      // Include the current slow inference in the valid-pair window, rather than resetting forever.
+      val duration = inferredAt - now
+      val pairWindow = maxOf(cadence.pairWindowMs, (3 * duration).coerceIn(3000, 10000))
+      val stable = stability.observe(observation, capturedAtNs, inferredAt, pairWindow)
       if (stable) {
-        // Transfer exactly this evidence frame to the UI. It is never silently updated.
-        bitmap = null
-      }
-      runOnUiThread {
-        if (!active || token != generation || isFinishing || frozen) {
-          if (stable) rotated.recycle()
-          return@runOnUiThread
+        reserved = synchronized(scanLock) {
+          if (active && token == generation && !destroyed && !frozen) { frozen = true; true }
+          else false
         }
-        overlay.box = null
-        if (stable) {
-          frozen = true
-          frozenBitmap = rotated; frozenResult = result
-          frozenImage.setImageBitmap(rotated); frozenImage.visibility = View.VISIBLE
-          overlay.frozenSize = Size(rotated.width, rotated.height); overlay.box = box
-          confirm.isEnabled = true
-          status.text = "Đã ổn định: $digits\nĐối chiếu chỉ số với ảnh trước khi xác nhận."
-        } else {
-          overlay.frozenSize = null
+        if (!reserved) return
+        val result = evidence.report().put("source", "realtime")
+          .put("totalMs", SystemClock.elapsedRealtime() - now)
+        val reportedAt = SystemClock.elapsedRealtime()
+        if (com.watermeterocr.BuildConfig.DEBUG) android.util.Log.d("RealtimeMeter",
+          "conversionMs=${convertedAt-now} inferenceMs=${inferredAt-convertedAt} " +
+            "reportMs=${reportedAt-inferredAt} frameMs=${reportedAt-now} " +
+            "scanToFreezeMs=${reportedAt-scanStartedMs} " +
+            "credibleToFreezeMs=${reportedAt-(stability.firstCredibleAtMs ?: inferredAt)}")
+        // Bitmap ownership transfers only after report construction and successful UI scheduling.
+        runOnUiThread { showFrozenReading(token, rotated, result, box) }
+        bitmap = null
+      } else {
+        val digits = evidence.reading.rawDigits
+        val pending = stability.pendingDigits
+        val reason = evidence.reading.reason
+        val tooSmall = box != null && (evidence.cropPlan.cropWidth < 130 || evidence.cropPlan.cropHeight < 24)
+        runOnUiThread {
+          if (!active || token != generation || destroyed || isFinishing || frozen) return@runOnUiThread
+          overlay.box = null; overlay.frozenSize = null
           val target = preview.outputTransform
           if (box != null && target != null) {
             try { CoordinateTransform(sourceTransform, target).mapRect(box); overlay.box = box }
             catch (_: IllegalArgumentException) { /* Wait for matching preview geometry. */ }
           }
-          status.text = when {
-            digits != null -> "Đang kiểm tra: $digits · giữ yên…"
-            result.optString("reason") == "multiple_rows" -> "Có nhiều đồng hồ. Đưa gần một dãy số."
-            box != null -> "Đã thấy vùng số. Giữ yên, tránh lóa và lấy nét lại."
+          updateStatus(when {
+            tooSmall -> "Đồng hồ còn xa · đưa điện thoại lại gần dãy số hơn."
+            pending != null -> "Đang xác nhận: $pending · giữ yên máy để lấy nét rõ…"
+            digits != null -> "Đang kiểm tra: $digits · giữ rõ toàn bộ 6 chữ số…"
+            reason == "multiple_rows" -> "Có nhiều đồng hồ. Đưa gần một dãy số."
+            box != null -> "Đã thấy vùng số. Giữ yên, tránh lóa và lấy nét đủ chữ số."
             else -> "Đang tìm vùng số. Đưa gần đồng hồ và tránh lóa."
-          }
+          })
+          overlay.invalidate()
         }
-        overlay.invalidate()
       }
     } catch (error: Exception) {
+      if (reserved) synchronized(scanLock) { if (token == generation) frozen = false }
       android.util.Log.w("RealtimeMeter", "Frame analysis failed", error)
       stability.reset()
       runOnUiThread {
-        if (active && token == generation) {
+        if (active && token == generation && !destroyed && !frozen) {
           overlay.box = null; overlay.invalidate()
-          status.text = "Chưa xử lý được camera. Bấm Quét lại hoặc đóng để chọn ảnh."
+          updateStatus("Chưa xử lý được camera. Bấm Quét lại hoặc đóng để chọn ảnh.")
         }
       }
-    } finally { bitmap?.recycle(); image.close() }
+    } finally {
+      if (started >= 0 && workerGeneration == token) {
+        val duration = SystemClock.elapsedRealtime() - started
+        cadence.recordDuration(duration)
+        if (com.watermeterocr.BuildConfig.DEBUG)
+          android.util.Log.d("RealtimeMeter", "analysisMs=$duration nextIntervalMs=${cadence.intervalMs}")
+      }
+      bitmap?.recycle(); image.close()
+    }
+  }
+
+  /** Main-thread handoff also owns disposal of rejected evidence. */
+  private fun showFrozenReading(token: Int, bitmap: Bitmap, result: JSONObject, box: RectF?): Boolean {
+    synchronized(scanLock) {
+      if (!active || token != generation || destroyed || isFinishing || frozenBitmap != null) {
+        bitmap.recycle(); return false
+      }
+      frozen = true
+      frozenBitmap = bitmap; frozenResult = result
+    }
+    frozenImage.setImageBitmap(bitmap); frozenImage.visibility = View.VISIBLE
+    overlay.frozenSize = Size(bitmap.width, bitmap.height); overlay.box = box
+    confirm.isEnabled = true
+    updateStatus("Đã giữ ảnh: ${result.optString("rawDigits")}\nĐối chiếu chỉ số với ảnh trước khi xác nhận.")
+    overlay.invalidate()
+    return true
   }
 
   private fun acceptReading() {
@@ -249,15 +346,21 @@ class RealtimeMeterActivity : ComponentActivity() {
         .put("result", result).toString()
       setResult(Activity.RESULT_OK, Intent().putExtra("reading", payload))
       finish()
-    } catch (_: Exception) { file?.delete(); status.text = "Không lưu được ảnh. Hãy thử xác nhận lại." }
+    } catch (_: Exception) { file?.delete(); updateStatus("Không lưu được ảnh. Hãy thử xác nhận lại.") }
   }
 
   override fun onDestroy() {
-    active = false; generation++
+    synchronized(scanLock) { active = false; destroyed = true; cameraBound = false; generation++; frozen = false }
     if (::camera.isInitialized) { camera.clearImageAnalysisAnalyzer(); camera.unbind() }
     frozenImage.setImageDrawable(null); frozenBitmap?.recycle(); frozenBitmap = null
-    worker.execute { engine?.close(); engine = null }
-    worker.shutdown()
+    try {
+      worker.execute {
+        try { engine?.close(); engine = null }
+        finally { worker.shutdown() }
+      }
+    } catch (_: java.util.concurrent.RejectedExecutionException) {
+      worker.shutdown()
+    }
     super.onDestroy()
   }
 

@@ -42,13 +42,11 @@ Camera dùng ứng dụng camera hệ thống qua `react-native-image-crop-picke
 
 ### Nhận diện realtime trên Android
 
-Bấm **Nhận diện realtime**, cấp quyền camera, đưa gần một dãy số và giữ yên. Chạm preview để lấy nét, dùng **Đèn pin** khi cần. Khi kết quả ổn định, ảnh được giữ lại kèm chuỗi số; đối chiếu và bấm **Dùng chỉ số này** để đưa ảnh/kết quả về màn hình chính. **Quét lại** bỏ kết quả đang giữ; **Đóng** hủy và giữ lựa chọn ảnh trước đó.
-
-CameraX `1.5.3` chạy preview và `ImageAnalysis` riêng, ưu tiên frame mới nhất. Yêu cầu độ phân giải phân tích `1280×960` (thiết bị có thể chọn kích thước phù hợp khác), chuyển RGBA sang Bitmap và xoay theo metadata, không ghi JPEG mỗi frame. Một worker tái sử dụng engine ba model; giới hạn đầu vào tối đa khoảng 2,5 lượt/giây và tự chậm lại theo thời gian suy luận.
-
-Chốt khi chuỗi 5–6 chữ số hiện tại có ít nhất 3 phiếu, chiếm đa số trong tối đa 5 mẫu/3 giây, trải trên ít nhất 800 ms. Mất vùng, đổi vùng quá nhiều hoặc khoảng cách giữa các kết quả trên 1,8 giây làm mất lịch sử; vùng được so bằng IoU tối thiểu 0,5. Đây là ổn định theo thời gian, không bảo đảm một chuỗi được nhận diện lặp lại là đúng. Không tự thêm số 0 đầu bị model bỏ sót.
-
-Khi xuống nền/đổi cấu hình, kết quả đang quét bị hủy; frame cũ không được chốt khi quay lại. Khi đóng màn hình, camera được unbind và các session đóng sau tác vụ đang chạy. Chỉ lúc xác nhận mới lưu một JPEG minh chứng trong cache để chuyển về React Native. Mục tiêu ổn định sau **2–3 giây** cần kiểm chứng trên điện thoại thật, chưa phải SLA; máy quá chậm vẫn có thể dùng chụp ảnh hoặc thư viện.
+Bấm **Nhận diện realtime**, cấp quyền camera, đưa điện thoại lại gần mặt đồng hồ và giữ yên:
+- Ứng dụng tự động tìm vùng số, kiểm tra độ rõ của từng chữ số ([`ReadingQuality.kt`](android/app/src/main/java/com/watermeterocr/ocr/ReadingQuality.kt)) và chỉ tự giữ ảnh khi đọc khớp **ít nhất 2 khung hình liên tiếp** trên vùng số đứng yên ([`ReadingStability.kt`](android/app/src/main/java/com/watermeterocr/ocr/ReadingStability.kt)).
+- Hỗ trợ khôi phục chữ số khi vòng quay cơ học đang nhảy dở giữa 2 số và khóa đủ 6 chữ số để tránh đọc thiếu ([`SuppliedYoloDecoder.kt`](android/app/src/main/java/com/watermeterocr/ocr/SuppliedYoloDecoder.kt)).
+- Phân tích AI chạy hoàn toàn trên luồng nền `worker` của [`RealtimeMeterActivity.kt`](android/app/src/main/java/com/watermeterocr/ocr/RealtimeMeterActivity.kt), đảm bảo khung ngắm camera mượt và không bị chớp đen khi di chuyển.
+- Sau khi máy giữ ảnh, người dùng đối chiếu và bấm **Dùng chỉ số này** để lưu hoặc **Quét lại** để chụp lại. Xem sơ đồ chi tiết tại [`docs/architecture.md`](../docs/architecture.md).
 
 ## Chạy local với emulator (Debug)
 

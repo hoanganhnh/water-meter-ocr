@@ -57,3 +57,8 @@ e2e/
 **/__mocks__
 /coverage
 plans
+
+# local
+.agentkit
+.agents
+engineer
